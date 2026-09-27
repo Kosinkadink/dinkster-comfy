@@ -609,13 +609,19 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
                 dit_config["allow_fp16"] = torch.std(state_dict['{}layers.{}.ffn_norm1.weight'.format(key_prefix, dit_config["n_layers"] - 2)], unbiased=False).item() < 0.42
             except Exception:
                 pass
+            dec_cond_key = '{}dec_net.cond_embed.weight'.format(key_prefix)
             if '{}cap_pad_token'.format(key_prefix) in state_dict_keys:
                 dit_config["pad_tokens_multiple"] = 32
+            # Ming-Image Design has no learned pad tokens; Layer needs a saved marker or repack metadata.
+            ming_metadata = metadata is not None and "config" in metadata and json.loads(metadata["config"]).get("transformer", {}).get("image_model") == "ming_image"
+            if '{}__ming_image__'.format(key_prefix) in state_dict_keys or ming_metadata or ("pad_tokens_multiple" not in dit_config and dec_cond_key not in state_dict_keys):
+                dit_config["image_model"] = "ming_image"
+                if "pad_tokens_multiple" not in dit_config:
+                    dit_config["masked_pad_multiple"] = 32
             sig_weight = state_dict.get('{}siglip_embedder.0.weight'.format(key_prefix), None)
             if sig_weight is not None:
                 dit_config["siglip_feat_dim"] = sig_weight.shape[0]
 
-            dec_cond_key = '{}dec_net.cond_embed.weight'.format(key_prefix)
             if dec_cond_key in state_dict_keys:  # pixel-space variant
                 dit_config["image_model"] = "zimage_pixel"
                 # patch_size and in_channels are derived from x_embedder:
@@ -659,11 +665,11 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         if patch_proj_key in state_dict_keys:
             w = state_dict[patch_proj_key]
             if w.ndim == 4:
-                # Conv2d: [out, in, kh, kw] — CogVideoX 1.0
+                # Conv2d: [out, in, kh, kw] - CogVideoX 1.0
                 dit_config["in_channels"] = w.shape[1]
                 dit_config["patch_size"] = w.shape[2]
             elif w.ndim == 2:
-                # Linear: [out, in_channels * patch_size * patch_size * patch_size_t] — CogVideoX 1.5
+                # Linear: [out, in_channels * patch_size * patch_size * patch_size_t] - CogVideoX 1.5
                 dit_config["patch_size"] = 2
                 dit_config["patch_size_t"] = 2
                 dit_config["in_channels"] = w.shape[1] // (2 * 2 * 2)  # 256 // 8 = 32
@@ -747,6 +753,8 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
             dit_config["model_type"] = "vace"
             dit_config["vace_in_dim"] = state_dict['{}vace_patch_embedding.weight'.format(key_prefix)].shape[1]
             dit_config["vace_layers"] = count_blocks(state_dict_keys, '{}vace_blocks.'.format(key_prefix) + '{}.')
+            if '{}img_emb.proj.0.bias'.format(key_prefix) in state_dict_keys:  # ID-V2V, vace on an i2v model
+                dit_config["vace_image_input"] = True
         elif '{}control_adapter.conv.weight'.format(key_prefix) in state_dict_keys:
             if '{}img_emb.proj.0.bias'.format(key_prefix) in state_dict_keys:
                 dit_config["model_type"] = "camera"
@@ -944,7 +952,7 @@ def detect_unet_config(state_dict, key_prefix, metadata=None):
         return {
             "image_model": "lens",
             "in_channels": img_in_w.shape[1],
-            "out_channels": proj_out_w.shape[0] // 4,  # patch_size ** 2 (=2² default)
+            "out_channels": proj_out_w.shape[0] // 4,  # patch_size ** 2 (=2^2 default)
             "num_layers": count_blocks(state_dict_keys, '{}transformer_blocks.'.format(key_prefix) + '{}.'),
             "num_attention_heads": img_in_w.shape[0] // 64,  # // attention_head_dim default
             "enc_hidden_dim": enc_hidden_dim,

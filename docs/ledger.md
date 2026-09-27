@@ -1,11 +1,11 @@
 # Fork ledger
 
 Upstream fork point: `comfyanonymous/ComfyUI` commit
-`b5cc8830279eae909a59de030af1e50761c36751`.
+`4ef23c34d950eecc37040a21ee1741a49d2e44b1`.
 
 | File or subsystem | Tier | Reason |
 | --- | --- | --- |
-| `dinkster_comfy/` except entries below | kept upstream | ComfyUI inference implementation, mechanically renamed from `comfy` and rewritten to import `dinkster_comfy` |
+| `dinkster_comfy/` except entries below | kept upstream | ComfyUI inference implementation, mechanically renamed from `comfy`, rewritten to import `dinkster_comfy`, and source-normalized to ASCII without runtime changes |
 | `dinkster_comfy/hooks.py` | changed by us | Owns `conditioning_set_values` instead of importing the deleted application helper |
 | `dinkster_comfy/ldm/sam3d_body/face_landmarker.py` | changed by us | Relocates the upstream face landmarker required by the retained SAM 3D Body model from deleted `comfy_extras` |
 | `dinkster_comfy/ldm/sam3d_body/model/model.py` | changed by us | Imports the relocated face landmarker from the library |
