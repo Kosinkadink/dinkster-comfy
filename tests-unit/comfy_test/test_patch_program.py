@@ -10,6 +10,8 @@ from dinkster_comfy.model_base import BaseModel
 from dinkster_comfy.model_patcher import LowVramPatch, ModelPatcher
 from dinkster_comfy.patch_program import ModuleInsertionEntry, PatchProgram
 from dinkster_comfy.patcher_extension import PatcherInjection
+from dinkster_comfy.weight_adapter.bypass import BypassInjectionManager
+from dinkster_comfy.weight_adapter.lora import LoRAAdapter
 
 
 def _program(value: torch.Tensor, *, target: str = "block.weight") -> PatchProgram:
@@ -262,6 +264,21 @@ class _RuntimePatch:
         self.events.append("cleanup")
 
 
+class _ModelPatchLike:
+    def __init__(self, model_patch: ModelPatcher):
+        self.model_patch = model_patch
+        self.encoded_image = torch.ones(1)
+        self.temp_data = None
+
+    def to(self, device_or_dtype):
+        self.encoded_image = self.encoded_image.to(device_or_dtype)
+        self.temp_data = None
+        return self
+
+    def models(self):
+        return [self.model_patch]
+
+
 def _identity(value):
     return value
 
@@ -429,6 +446,27 @@ def test_injections_use_structural_program_materialization() -> None:
     assert patcher.get_injections("test") is None
 
 
+def test_bypass_adapter_injection_materializes_and_restores_forward() -> None:
+    model = torch.nn.Module()
+    model.layer = torch.nn.Linear(2, 2, bias=False)
+    patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+    adapter = LoRAAdapter.create_train(model.layer.weight, rank=1, alpha=1.0)
+    adapter.lora_up.weight.data.fill_(1.0)
+    adapter.lora_down.weight.data.fill_(1.0)
+    manager = BypassInjectionManager()
+    manager.add_adapter("layer.weight", adapter)
+    patcher.set_injections("motion", manager.create_injections(model))
+    value = torch.ones(1, 2)
+    original = model.layer(value)
+
+    patcher.inject_model()
+    patched = model.layer(value)
+    patcher.eject_model()
+
+    assert not torch.equal(patched, original)
+    torch.testing.assert_close(model.layer(value), original, rtol=0, atol=0)
+
+
 def test_additional_models_use_clone_scoped_program_resources() -> None:
     parent = _site_patcher()
     auxiliary = _site_patcher()
@@ -534,3 +572,17 @@ def test_runtime_patch_lifecycle_uses_program_resources() -> None:
     assert compiled["post_input"][0].value.dtype == torch.float16
     assert events == ["cleanup"]
     patcher._validate_patch_program()
+
+
+def test_model_patch_resource_exposes_auxiliary_model() -> None:
+    patcher = _site_patcher()
+    auxiliary = _site_patcher()
+    model_patch = _ModelPatchLike(auxiliary)
+
+    patcher.set_model_patch(model_patch, "post_input")
+    patcher.model_patches_to(torch.float16)
+
+    assert patcher.model_patches_models() == [auxiliary]
+    compiled = patcher.model_options["transformer_options"]["patches"]
+    assert compiled["post_input"] == [model_patch]
+    assert model_patch.encoded_image.dtype == torch.float16
