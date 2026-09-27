@@ -40,6 +40,7 @@ import dinkster_comfy.patcher_extension
 import dinkster_comfy.utils
 import comfy_aimdo.host_buffer
 from dinkster_comfy.comfy_types import UnetWrapperFunction
+from dinkster_comfy.contribution_gain import ContributionGain
 from dinkster_comfy.internal_logging import detail
 from dinkster_comfy.patch_program import ModuleInsertionEntry, PatchProgram
 from dinkster_comfy.quant_ops import QuantizedTensor
@@ -1586,6 +1587,31 @@ class ModelPatcher:
         if not entries:
             return None
         return [entry.resources.value for entry in entries]
+
+    def set_bypass_adapters(self, key, adapters):
+        namespace = f"bypass:{key}"
+        entries = tuple(
+            ModuleInsertionEntry.create(
+                namespace=namespace,
+                site="model.root",
+                recipe="dinkster.scheduled_bypass",
+                resources=ScheduledBypassAdapter.create(
+                    target,
+                    adapter,
+                    strength,
+                    ContributionGain(),
+                    None,
+                ),
+                order=order,
+            )
+            for order, (target, (adapter, strength)) in enumerate(
+                sorted(adapters.items())
+            )
+        )
+        self.set_module_insertions(namespace, entries)
+
+    def remove_bypass_adapters(self, key):
+        self.set_module_insertions(f"bypass:{key}", ())
 
     def set_additional_models(self, key: str, models: list['ModelPatcher']):
         namespace = f"additional:{key}"

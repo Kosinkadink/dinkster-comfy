@@ -309,6 +309,8 @@ class ScheduledBypassMaterializer:
         module = patcher.model.get_submodule(module_key)
 
         def active_multiplier(output):
+            if resource.hook_ref is None:
+                return resource.strength
             if patcher.current_hooks is None:
                 return 0.0
             for hook in patcher.current_hooks.hooks:

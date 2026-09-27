@@ -252,6 +252,26 @@ def test_guidance_row_gain_routes_float_adapter_through_bypass():
     assert torch.equal(output[1], torch.full((2,), 0.5))
 
 
+def test_static_bypass_adapter_program_preserves_trainable_resource():
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2, bias=False))
+    model[0].weight.data.zero_()
+    patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+    adapter = _BypassAdapter()
+    patcher.set_bypass_adapters("training", {"0.weight": (adapter, 0.5)})
+
+    patcher.inject_model()
+    assert torch.equal(model(torch.ones(1, 2)), torch.full((1, 2), 0.5))
+    patcher.eject_model()
+
+    adapter.weights[0].fill_(2.0)
+    patcher.inject_model()
+    assert torch.equal(model(torch.ones(1, 2)), torch.full((1, 2), 0.5))
+
+    patcher.eject_model()
+    patcher.remove_bypass_adapters("training")
+    assert patcher.get_module_insertions("bypass:training") == ()
+
+
 def test_program_identity_distinguishes_scheduled_bypass_gain_declarations(monkeypatch):
     monkeypatch.setattr(model_patcher_module, "QuantizedTensor", torch.Tensor)
     model = torch.nn.Sequential(torch.nn.Linear(2, 2, bias=False))
