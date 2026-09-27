@@ -180,12 +180,6 @@ class LowVramPatch:
         self.convert_func = convert_func # TODO: remove
         self.set_func = set_func
         self.prepared_patches = None
-        self.validated = False
-
-    def validate_once(self):
-        if not self.validated:
-            self.validate(self.key)
-            self.validated = True
 
     def memory_required(self):
         counter = [0]
@@ -202,16 +196,14 @@ class LowVramPatch:
         ]
         if commit:
             self.prepared_patches = prepared_patches
-            self.validated = True
         return prepared_patches
 
     def clear_prepared(self):
         self.prepared_patches = None
-        self.validated = False
 
     def __call__(self, weight):
         if self.prepared_patches is None:
-            self.validate_once()
+            self.validate(self.key)
         patches = self.prepared_patches if self.prepared_patches is not None else self.patches[self.key]
         return dinkster_comfy.lora.calculate_weight(patches, weight, self.key, intermediate_dtype=weight.dtype)
 

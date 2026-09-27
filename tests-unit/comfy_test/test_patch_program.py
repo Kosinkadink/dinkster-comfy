@@ -179,6 +179,22 @@ def test_low_vram_patch_validates_before_deferred_materialization() -> None:
         deferred(model.weight.detach().clone())
 
 
+def test_low_vram_patch_revalidates_each_deferred_materialization() -> None:
+    model = torch.nn.Linear(2, 2, bias=False)
+    patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+    delta = torch.ones_like(model.weight)
+    patcher.add_patches({"weight": ("diff", (delta,))})
+    deferred = LowVramPatch(
+        "weight", patcher.patches, patcher.patch_program.validate_resources
+    )
+    deferred(model.weight.detach().clone())
+
+    delta[0, 0] = 2.0
+
+    with pytest.raises(RuntimeError, match="patch resource for 'weight' changed"):
+        deferred(model.weight.detach().clone())
+
+
 @pytest.mark.parametrize("strength", [float("inf"), float("-inf"), float("nan")])
 def test_non_finite_strength_is_refused(strength: float) -> None:
     with pytest.raises(ValueError, match="strength_patch must be finite"):
