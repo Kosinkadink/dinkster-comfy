@@ -3,7 +3,8 @@ import torch
 
 from dinkster_comfy.contribution_gain import ContributionGain, GainKeyframe, GainTimeline
 from dinkster_comfy.controlnet import ControlBase
-from dinkster_comfy.hooks import Hook, HookKeyframe, HookKeyframeGroup
+from dinkster_comfy.hooks import Hook, HookGroup, HookKeyframe, HookKeyframeGroup, WeightHook
+from dinkster_comfy.model_patcher import HookWeightPatch, ModelPatcher
 from dinkster_comfy.samplers import realize_contribution_gains
 
 
@@ -134,3 +135,28 @@ def test_control_residual_uses_realized_global_site_lane_and_mask_gain():
         merged["middle"][0],
         torch.tensor([[[[0.125, 0.0], [0.125, 0.0]]]]),
     )
+
+
+def test_float_weight_overlay_reads_the_active_realized_hook_gain_per_call():
+    patcher = ModelPatcher(
+        torch.nn.Linear(2, 2, bias=False),
+        torch.device("cpu"),
+        torch.device("cpu"),
+    )
+    hook = WeightHook()
+    hook.current_gain = 0.25
+    patcher.hook_patches[hook.hook_ref] = {
+        "weight": [
+            (1.0, ("diff", (torch.ones(2, 2),)), 1.0, None, None)
+        ]
+    }
+    overlay = HookWeightPatch(patcher, "weight")
+    weight = torch.zeros(2, 2)
+
+    assert torch.equal(overlay(weight), weight)
+
+    active = HookGroup()
+    active.add(hook)
+    patcher.current_hooks = active
+
+    assert torch.equal(overlay(weight), torch.full((2, 2), 0.25))

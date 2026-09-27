@@ -24,6 +24,7 @@ import logging
 import math
 import time
 import uuid
+import weakref
 from types import MappingProxyType
 from typing import Callable, Optional
 
@@ -206,6 +207,26 @@ class LowVramPatch:
             self.validate(self.key)
         patches = self.prepared_patches if self.prepared_patches is not None else self.patches[self.key]
         return dinkster_comfy.lora.calculate_weight(patches, weight, self.key, intermediate_dtype=weight.dtype)
+
+
+class HookWeightPatch:
+    def __init__(self, patcher, key):
+        self.patcher = weakref.ref(patcher)
+        self.key = key
+
+    def __call__(self, weight):
+        patcher = self.patcher()
+        if patcher is None or patcher.current_hooks is None:
+            return weight
+        patches = patcher.get_combined_hook_patches(patcher.current_hooks).get(self.key)
+        if not patches:
+            return weight
+        return dinkster_comfy.lora.calculate_weight(
+            patches,
+            weight,
+            self.key,
+            intermediate_dtype=weight.dtype,
+        )
 
 LOWVRAM_PATCH_ESTIMATE_MATH_FACTOR = 2
 
@@ -401,6 +422,7 @@ class ModelPatcher:
         self.hook_patches_backup: dict[dinkster_comfy.hooks._HookRef] = None
         self.hook_backup: dict[str, tuple[torch.Tensor, torch.device]] = {}
         self.cached_hook_patches: dict[dinkster_comfy.hooks.HookGroup, dict[str, torch.Tensor]] = {}
+        self.hook_weight_function_keys = set()
         self.current_hooks: Optional[dinkster_comfy.hooks.HookGroup] = None
         self.forced_hooks: Optional[dinkster_comfy.hooks.HookGroup] = None  # NOTE: only used for CLIP at this time
         self.is_clip = False
@@ -1113,11 +1135,13 @@ class ModelPatcher:
         self._validate_patch_program()
         with self.use_ejected():
             self.unpatch_hooks()
+            self.hook_weight_function_keys.clear()
             mem_counter = 0
             patch_counter = 0
             lowvram_counter = 0
             lowvram_mem_counter = 0
             loading = self._load_list()
+            hook_patch_keys = self.get_hook_patch_keys()
 
             load_completely = []
             offloaded = []
@@ -1184,8 +1208,20 @@ class ModelPatcher:
                 if weight_key in self.weight_wrapper_patches:
                     m.weight_function.extend(self.weight_wrapper_patches[weight_key])
 
+                if (
+                    weight_key in hook_patch_keys
+                    and hasattr(m, "weight_function")
+                    and not isinstance(m.weight, QuantizedTensor)
+                ):
+                    m.weight_function.append(HookWeightPatch(self, weight_key))
+                    self.hook_weight_function_keys.add(weight_key)
+
                 if bias_key in self.weight_wrapper_patches:
                     m.bias_function.extend(self.weight_wrapper_patches[bias_key])
+
+                if bias_key in hook_patch_keys and hasattr(m, "bias_function"):
+                    m.bias_function.append(HookWeightPatch(self, bias_key))
+                    self.hook_weight_function_keys.add(bias_key)
 
                 mem_counter += move_weight_functions(m, device_to)
 
@@ -1735,6 +1771,13 @@ class ModelPatcher:
                     combined_patches[key] = current_patches
         return combined_patches
 
+    def get_hook_patch_keys(self):
+        return {
+            key
+            for patches in self.hook_patches.values()
+            for key in patches
+        }
+
     def apply_hooks(self, hooks: dinkster_comfy.hooks.HookGroup, transformer_options: dict=None, force_apply=False):
         # TODO: return transformer_options dict with any additions from hooks
         if self.current_hooks == hooks and (not force_apply or (not self.is_clip and hooks is None)):
@@ -1766,7 +1809,11 @@ class ModelPatcher:
                     self.unpatch_hooks(model_sd_keys_set)
                 else:
                     self.unpatch_hooks()
-                    relevant_patches = self.get_combined_hook_patches(hooks=hooks)
+                    relevant_patches = {
+                        key: patches
+                        for key, patches in self.get_combined_hook_patches(hooks=hooks).items()
+                        if key not in self.hook_weight_function_keys
+                    }
                     original_weights = None
                     if len(relevant_patches) > 0:
                         original_weights = self.get_key_patches()
