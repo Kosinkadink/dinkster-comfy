@@ -192,15 +192,27 @@ def test_comfy_adapter_owns_seed_sigma_dtype_and_step_callbacks() -> None:
     assert all(event["sigma"].dtype is initial.dtype for event in callback_events)
 
 
-def test_comfy_adapter_refuses_v_prediction_instead_of_treating_it_as_eps() -> None:
+@pytest.mark.parametrize("sampling", (model_sampling.V_PREDICTION(), model_sampling.X0()))
+def test_comfy_adapter_refuses_non_eps_subclasses(sampling: object) -> None:
     sample = sampler_function("res_2m")
     with pytest.raises(ValueError, match="supports only the EPS and flow parameterizations"):
         sample(
-            _ComfyModel(model_sampling.V_PREDICTION()),
+            _ComfyModel(sampling),
             _tensor(GOLDEN["initial"]),
             torch.tensor([1.0, 0.0]),
             extra_args={"seed": 29},
         )
+
+
+def test_comfy_adapter_accepts_image_to_image_flow_as_flow() -> None:
+    result = sampler_function("res_2m")(
+        _ComfyModel(model_sampling.IMG_TO_IMG_FLOW()),
+        _tensor(GOLDEN["initial"]),
+        torch.tensor([1.0, 0.0]),
+        extra_args={"seed": 29},
+    )
+
+    assert torch.isfinite(result).all()
 
 
 def test_comfy_adapter_uses_deterministic_default_when_optional_seed_is_none() -> None:

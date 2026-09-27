@@ -95,12 +95,16 @@ class RES4LYFTwoStreamNoise:
 
 
 def _parameterization(sampling: object) -> Parameterization:
+    if isinstance(sampling, model_sampling.IMG_TO_IMG_FLOW):
+        return Parameterization.IMAGE_TO_IMAGE_FLOW
     if isinstance(sampling, model_sampling.CONST):
         return Parameterization.FLOW
     if isinstance(sampling, model_sampling.EDM):
         return Parameterization.EDM
     if isinstance(sampling, model_sampling.V_PREDICTION):
         return Parameterization.V_PREDICTION
+    if isinstance(sampling, model_sampling.X0):
+        return Parameterization.X0
     if isinstance(sampling, model_sampling.EPS):
         return Parameterization.EPS
     raise TypeError(f"unsupported RES4LYF model sampling type {type(sampling).__name__}")
