@@ -35,6 +35,8 @@ def _descriptor(
 ) -> object:
     if value is None or isinstance(value, (bool, int, str)):
         return value
+    if isinstance(value, (torch.device, torch.dtype)):
+        return str(value)
     if isinstance(value, float):
         if not math.isfinite(value):
             raise ValueError("patch program values must be finite")
@@ -291,7 +293,32 @@ class ModuleInsertionEntry:
             )
 
 
-PatchEntry = WeightDeltaEntry | ModuleInsertionEntry
+@dataclass(frozen=True)
+class ObjectReplacementEntry:
+    target: str
+    replacement: PatchResource
+
+    @classmethod
+    def create(cls, *, target: str, replacement: object) -> ObjectReplacementEntry:
+        if not target:
+            raise ValueError("object replacement target must not be empty")
+        return cls(target=target, replacement=PatchResource.bind(replacement))
+
+    def descriptor(self) -> dict[str, object]:
+        return {
+            "kind": "object_replacement",
+            "target": self.target,
+            "replacement": self.replacement.identity,
+        }
+
+    def validate_resources(self) -> None:
+        if self.replacement.identity != _digest(self.replacement.value):
+            raise RuntimeError(
+                f"object replacement for '{self.target}' changed after binding"
+            )
+
+
+PatchEntry = WeightDeltaEntry | ModuleInsertionEntry | ObjectReplacementEntry
 
 
 @dataclass(frozen=True)
@@ -312,7 +339,7 @@ class PatchProgram:
     def validate_resources(self, target: str | None = None) -> None:
         tensor_digests: dict[int, str] = {}
         for entry in self.entries:
-            if isinstance(entry, ModuleInsertionEntry):
+            if isinstance(entry, (ModuleInsertionEntry, ObjectReplacementEntry)):
                 if target is None:
                     entry.validate_resources()
                 continue
@@ -414,6 +441,31 @@ class PatchProgram:
             if isinstance(entry, ModuleInsertionEntry)
             and (namespace is None or entry.namespace == namespace)
         )
+
+    def replace_object(self, target: str, replacement: object) -> PatchProgram:
+        entry = ObjectReplacementEntry.create(target=target, replacement=replacement)
+        retained = tuple(
+            current
+            for current in self.entries
+            if not (
+                isinstance(current, ObjectReplacementEntry) and current.target == target
+            )
+        )
+        return PatchProgram((*retained, entry))
+
+    def object_replacements(self) -> dict[str, object]:
+        return {
+            entry.target: entry.replacement.value
+            for entry in self.entries
+            if isinstance(entry, ObjectReplacementEntry)
+        }
+
+    def replace_weight_deltas(self, patches: Mapping[str, list[tuple]]) -> PatchProgram:
+        weights = PatchProgram.from_weight_patches(patches).entries
+        retained = tuple(
+            entry for entry in self.entries if not isinstance(entry, WeightDeltaEntry)
+        )
+        return PatchProgram((*retained, *weights))
 
     @classmethod
     def from_weight_patches(cls, patches: Mapping[str, list[tuple]]) -> PatchProgram:

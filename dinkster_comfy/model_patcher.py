@@ -365,7 +365,6 @@ class ModelPatcher:
         self._patch_scratch = {}
         self.backup = {}
         self.backup_buffers = {}
-        self.object_patches = {}
         self.object_patches_backup = {}
         self.weight_wrapper_patches = {}
         self.model_options = {"transformer_options":{}}
@@ -463,7 +462,6 @@ class ModelPatcher:
         n.patch_materializers = self.patch_materializers.copy()
         n.patches_uuid = self.patches_uuid
 
-        n.object_patches = self.object_patches.copy()
         n.weight_wrapper_patches = self.weight_wrapper_patches.copy()
         n.model_options = dinkster_comfy.utils.deepcopy_list_dict(self.model_options)
         n.parent = self
@@ -832,13 +830,13 @@ class ModelPatcher:
 
 
     def add_object_patch(self, name, obj):
-        self.object_patches[name] = obj
+        self._set_patch_program(self.patch_program.replace_object(name, obj))
+        self.patches_uuid = self.patch_program.digest
 
     def set_model_compute_dtype(self, dtype):
         self.add_object_patch("manual_cast_dtype", dtype)
         if dtype is not None:
             self.force_cast_weights = True
-        self.patches_uuid = uuid.uuid4() #TODO: optimize by preventing a full model reload for this
 
     def add_weight_wrapper(self, name, function):
         self.weight_wrapper_patches[name] = self.weight_wrapper_patches.get(name, []) + [function]
@@ -942,7 +940,7 @@ class ModelPatcher:
 
     @patches.setter
     def patches(self, patches):
-        program = PatchProgram.from_weight_patches(patches)
+        program = self.patch_program.replace_weight_deltas(patches)
         self._set_patch_program(program)
         self.patches_uuid = program.digest
 
@@ -950,6 +948,7 @@ class ModelPatcher:
         self.patch_program = program
         patches = program.weight_patches()
         self._compiled_patches = MappingProxyType({key: tuple(entries) for key, entries in patches.items()})
+        self.object_patches = MappingProxyType(program.object_replacements())
 
     def _validate_patch_program(self, target=None):
         self.patch_program.validate_resources(target)
@@ -1232,6 +1231,7 @@ class ModelPatcher:
 
     def patch_model(self, device_to=None, lowvram_model_memory=0, load_weights=True, force_patch_weights=False):
         with self.use_ejected():
+            self._validate_patch_program()
             for k in self.object_patches:
                 old = dinkster_comfy.utils.set_attr(self.model, k, self.object_patches[k])
                 if k not in self.object_patches_backup:

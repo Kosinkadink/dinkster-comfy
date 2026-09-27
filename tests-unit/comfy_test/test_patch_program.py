@@ -397,3 +397,37 @@ def test_module_insertion_revalidates_resources_before_materialization() -> None
         RuntimeError, match="module insertion resources for 'motion' changed"
     ):
         patcher.inject_model()
+
+
+def test_object_patch_derives_program_without_changing_parent() -> None:
+    parent = _site_patcher()
+    child = parent.clone()
+
+    child.add_object_patch("model_sampling", {"kind": "test"})
+
+    assert parent.object_patches == {}
+    assert child.object_patches == {"model_sampling": {"kind": "test"}}
+    assert parent.patch_program.digest != child.patch_program.digest
+
+
+def test_replacing_weight_patches_preserves_object_patch() -> None:
+    patcher = _site_patcher()
+    patcher.add_object_patch("manual_cast_dtype", torch.float16)
+
+    patcher.patches = {
+        "weight": [(1.0, ("diff", (torch.ones(2, 2),)), 1.0, None, None)]
+    }
+
+    assert patcher.object_patches == {"manual_cast_dtype": torch.float16}
+
+
+def test_object_patch_resource_mutation_is_refused() -> None:
+    patcher = _site_patcher()
+    replacement = {"value": torch.ones(1)}
+    patcher.add_object_patch("model_sampling", replacement)
+    replacement["value"][0] = 2.0
+
+    with pytest.raises(
+        RuntimeError, match="object replacement for 'model_sampling' changed"
+    ):
+        patcher._validate_patch_program()
