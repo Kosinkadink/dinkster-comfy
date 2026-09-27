@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  package-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build wheel
+        run: |
+          python -m pip install --upgrade build
+          python -m build --wheel
+      - name: Install wheel and test dependencies
+        run: |
+          python -m pip install dist/*.whl
+          python -m pip install -r tests-unit/requirements.txt
+      - name: Verify standalone imports
+        run: python -c "import dinkster_comfy.sd, dinkster_comfy.samplers, dinkster_comfy.model_management"
+      - name: Run retained library tests
+        run: python -m pytest -q tests-unit/comfy_test tests-unit/comfy_quant tests-unit/deploy_environment_test.py
