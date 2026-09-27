@@ -176,6 +176,31 @@ def test_temporal_adapter_compiles_stock_context_schedule_without_raw_dimension_
     assert executor.latent_layout == WindowTensorLayout("latent", (("temporal", 2),))
 
 
+def test_temporal_adapter_stacks_with_a_spatial_layer():
+    temporal = TemporalWindowPlan(
+        get_matching_context_schedule(ContextSchedules.STATIC_STANDARD),
+        get_matching_fuse_method(ContextFuseMethods.FLAT),
+        context_length=2,
+    )
+    height = MediaAxis("height", 2)
+    kinds = (_kind("latent", (height, MediaAxis("temporal", 2))),)
+
+    executor = temporal.executor(
+        extent=2,
+        latent_dimension=3,
+        model_options={},
+        axes=(height,),
+        layers=(_layer("height", ((0,), (1,))),),
+        kinds=kinds,
+        latent_axis_dimensions=(("height", 2),),
+    )
+
+    assert len(executor.plan.joint_windows) == 2
+    assert executor.latent_layout == WindowTensorLayout(
+        "latent", (("height", 2), ("temporal", 3))
+    )
+
+
 def test_executor_maps_asymmetric_nested_video_and_audio_streams():
     temporal = MediaAxis("temporal", 3)
     layer = _layer("temporal", ((0, 1), (1, 2)))

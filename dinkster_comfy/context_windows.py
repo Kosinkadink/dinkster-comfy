@@ -388,13 +388,19 @@ class TemporalWindowPlan:
         layers: tuple[dinkster_comfy.window_plan.WindowPlanLayer, ...] = (),
         axes: tuple[dinkster_comfy.window_plan.MediaAxis, ...] = (),
         kinds: tuple[dinkster_comfy.window_plan.WindowKind, ...] = (),
+        latent_axis_dimensions: tuple[tuple[str, int], ...] = (),
     ) -> dinkster_comfy.window_execution.WindowPlanExecutor:
         temporal_axis = dinkster_comfy.window_plan.MediaAxis(
             "temporal",
             extent,
             wrappable=self.context_schedule.name == ContextSchedules.UNIFORM_LOOPED,
         )
-        declared_axes = (temporal_axis,) + tuple(axis for axis in axes if axis.name != "temporal")
+        declared_axes = tuple(
+            sorted(
+                (temporal_axis,) + tuple(axis for axis in axes if axis.name != "temporal"),
+                key=lambda axis: axis.name,
+            )
+        )
         if not kinds:
             kinds = (
                 dinkster_comfy.window_plan.WindowKind(
@@ -413,7 +419,9 @@ class TemporalWindowPlan:
             kinds=kinds,
             layers=(self.layer(extent, model_options),) + layers,
         )
-        latent_axes = [("temporal", latent_dimension)]
+        latent_axes = (("temporal", latent_dimension),) + tuple(
+            item for item in latent_axis_dimensions if item[0] != "temporal"
+        )
         return dinkster_comfy.window_execution.WindowPlanExecutor(
             plan,
             dinkster_comfy.window_execution.WindowTensorLayout(
