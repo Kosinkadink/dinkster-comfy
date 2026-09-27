@@ -2,6 +2,10 @@ import logging
 
 import pytest
 
+from dinkster_comfy.cli_args import args
+
+args.cpu = True
+
 from dinkster_comfy.ldm.modules import attention
 
 
