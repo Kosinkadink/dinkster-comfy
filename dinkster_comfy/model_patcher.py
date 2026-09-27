@@ -40,7 +40,7 @@ import dinkster_comfy.utils
 import comfy_aimdo.host_buffer
 from dinkster_comfy.comfy_types import UnetWrapperFunction
 from dinkster_comfy.internal_logging import detail
-from dinkster_comfy.patch_program import PatchProgram
+from dinkster_comfy.patch_program import ModuleInsertionEntry, PatchProgram
 from dinkster_comfy.quant_ops import QuantizedTensor
 from dinkster_comfy.patcher_extension import CallbacksMP, PatcherInjection, WrappersMP
 
@@ -343,6 +343,17 @@ class LazyCastingParamPiece(torch.nn.Parameter):
         return caster.state_dict_tensor(self.state_dict_key)
 
 
+class _PatcherInjectionMaterializer:
+    def create_handle(self, patcher, site, entry, scratch):
+        return entry.resources.value
+
+    def materialize(self, patcher, injection):
+        injection.inject(patcher)
+
+    def teardown(self, patcher, injection):
+        injection.eject(patcher)
+
+
 class ModelPatcher:
     def __init__(self, model, load_device, offload_device, size=0, weight_inplace_update=False, fast_disk=False):
         self.size = size
@@ -362,6 +373,9 @@ class ModelPatcher:
         }
         self.patch_site_map = MappingProxyType(patch_site_map)
         self.patch_materializers = {}
+        self.register_patch_materializer(
+            "dinkster.patcher_injection", _PatcherInjectionMaterializer()
+        )
         self._materialized_insertions = []
         self._patch_scratch = {}
         self.backup = {}
@@ -377,13 +391,11 @@ class ModelPatcher:
         self.pinned = set()
 
         self.attachments: dict[str] = {}
-        self.additional_models: dict[str, list[ModelPatcher]] = {}
         self.callbacks: dict[str, dict[str, list[Callable]]] = CallbacksMP.init_callbacks()
         self.wrappers: dict[str, dict[str, list[Callable]]] = WrappersMP.init_wrappers()
 
         self.is_injected = False
         self.skip_injection = False
-        self.injections: dict[str, list[PatcherInjection]] = {}
 
         self.hook_patches: dict[dinkster_comfy.hooks._HookRef] = {}
         self.hook_patches_backup: dict[dinkster_comfy.hooks._HookRef] = None
@@ -415,6 +427,13 @@ class ModelPatcher:
 
     def is_dynamic(self):
         return False
+
+    def patch_program_descriptor(self):
+        return {
+            "type": f"{type(self).__module__}.{type(self).__qualname__}",
+            "base": str(self.clone_base_uuid),
+            "program": self.patch_program.digest,
+        }
 
     def model_size(self):
         if self.size > 0:
@@ -457,7 +476,7 @@ class ModelPatcher:
             model_override = self.get_clone_model_override()
 
         n = class_(model_override[0], self.load_device, self.offload_device, self.model_size(), weight_inplace_update=self.weight_inplace_update, fast_disk=self.fast_disk)
-        n._set_patch_program(self.patch_program)
+        n._set_patch_program(self.patch_program.clone_module_resources())
         n.patch_site_map = self.patch_site_map
         n.patch_materializers = self.patch_materializers.copy()
         n.patches_uuid = self.patches_uuid
@@ -477,9 +496,6 @@ class ModelPatcher:
                 n.attachments[k] = self.attachments[k].on_model_patcher_clone()
             else:
                 n.attachments[k] = self.attachments[k]
-        # additional models
-        for k, c in self.additional_models.items():
-            n.additional_models[k] = [x.clone() for x in c]
         # callbacks
         for k, c in self.callbacks.items():
             n.callbacks[k] = {}
@@ -490,11 +506,8 @@ class ModelPatcher:
             n.wrappers[k] = {}
             for k1, w1 in w.items():
                 n.wrappers[k][k1] = w1.copy()
-        # injection
         n.is_injected = self.is_injected
         n.skip_injection = self.skip_injection
-        for k, i in self.injections.items():
-            n.injections[k] = i.copy()
         # hooks
         n.hook_patches = create_hook_patches_clone(self.hook_patches)
         n.hook_patches_backup = create_hook_patches_clone(self.hook_patches_backup) if self.hook_patches_backup else self.hook_patches_backup
@@ -555,12 +568,13 @@ class ModelPatcher:
         # multigpu_clone all stored additional_models; make sure circular references are properly handled
         if models_cache is None:
             models_cache = {}
-        for key, model_list in n.additional_models.items():
-            for i in range(len(model_list)):
-                add_model = n.additional_models[key][i]
+        for key, model_list in tuple(n.additional_models.items()):
+            cloned_models = []
+            for add_model in model_list:
                 if add_model.clone_base_uuid not in models_cache:
                     models_cache[add_model.clone_base_uuid] = add_model.deepclone_multigpu(new_load_device=new_load_device, models_cache=models_cache)
-                n.additional_models[key][i] = models_cache[add_model.clone_base_uuid]
+                cloned_models.append(models_cache[add_model.clone_base_uuid])
+            n.set_additional_models(key, cloned_models)
         for callback in self.get_all_callbacks(CallbacksMP.ON_DEEPCLONE_MULTIGPU):
             callback(self, n)
         return n
@@ -576,8 +590,13 @@ class ModelPatcher:
                 n.hook_backup = mm.hook_backup
                 n.is_multigpu_base_clone = mm.is_multigpu_base_clone
                 n.remove_additional_models("multigpu")
-                orig_additional_models: dict[str, list[ModelPatcher]] = dinkster_comfy.patcher_extension.copy_nested_dicts(n.additional_models)
-                n.additional_models = dinkster_comfy.patcher_extension.copy_nested_dicts(mm.additional_models)
+                orig_additional_models = {
+                    key: list(models) for key, models in n.additional_models.items()
+                }
+                for key in tuple(n.additional_models):
+                    n.remove_additional_models(key)
+                for key, models in mm.additional_models.items():
+                    n.set_additional_models(key, list(models))
                 # figure out which additional models are not present in multigpu clone
                 models_cache = {}
                 for mm_add_model in mm.get_additional_models():
@@ -593,7 +612,7 @@ class ModelPatcher:
                         if orig_add_model.clone_base_uuid in remove_models_uuids:
                             remove_models_uuids.remove(orig_add_model.clone_base_uuid)
                 # remove duplicate additional models
-                for key, model_list in n.additional_models.items():
+                for key, model_list in tuple(n.additional_models.items()):
                     new_model_list = [x for x in model_list if x.clone_base_uuid not in remove_models_uuids]
                     n.set_additional_models(key, new_model_list)
                 for callback in self.get_all_callbacks(CallbacksMP.ON_MATCH_MULTIGPU_CLONES):
@@ -630,8 +649,6 @@ class ModelPatcher:
         for key in self.wrappers:
             if len(self.wrappers[key]) != len(clone.wrappers[key]):
                 return False
-        if self.injections.keys() != clone.injections.keys():
-            return False
 
         if len(self.patches) == 0 and len(clone.patches) == 0:
             return True
@@ -699,7 +716,7 @@ class ModelPatcher:
                 raise ValueError(
                     f"unknown module insertion site '{entry.site}'; available sites: {available}"
                 )
-            if entry.recipe not in self.patch_materializers:
+            if entry.activation != 0.0 and entry.recipe not in self.patch_materializers:
                 raise ValueError(
                     f"module insertion recipe '{entry.recipe}' is not registered"
                 )
@@ -926,6 +943,14 @@ class ModelPatcher:
         patches = program.weight_patches()
         self._compiled_patches = MappingProxyType({key: tuple(entries) for key, entries in patches.items()})
         self.object_patches = MappingProxyType(program.object_replacements())
+        additional_models = {}
+        for entry in program.module_insertions():
+            if entry.recipe == "dinkster.additional_model":
+                key = entry.namespace.removeprefix("additional:")
+                additional_models.setdefault(key, []).append(entry.resources.value)
+        self.additional_models = MappingProxyType(
+            {key: tuple(models) for key, models in additional_models.items()}
+        )
         transformer_options = self.model_options["transformer_options"]
         transformer_options.pop("patches", None)
         transformer_options.pop("patches_replace", None)
@@ -1476,24 +1501,52 @@ class ModelPatcher:
         return self.attachments.get(key, None)
 
     def set_injections(self, key: str, injections: list[PatcherInjection]):
-        self.injections[key] = injections
+        namespace = f"injection:{key}"
+        entries = tuple(
+            ModuleInsertionEntry.create(
+                namespace=namespace,
+                site="model.root",
+                recipe="dinkster.patcher_injection",
+                resources=injection,
+                order=order,
+            )
+            for order, injection in enumerate(injections)
+        )
+        self.set_module_insertions(namespace, entries)
 
     def remove_injections(self, key: str):
-        if key in self.injections:
-            self.injections.pop(key)
+        self.set_module_insertions(f"injection:{key}", ())
 
     def get_injections(self, key: str):
-        return self.injections.get(key, None)
+        entries = self.get_module_insertions(f"injection:{key}")
+        if not entries:
+            return None
+        return [entry.resources.value for entry in entries]
 
     def set_additional_models(self, key: str, models: list['ModelPatcher']):
-        self.additional_models[key] = models
+        namespace = f"additional:{key}"
+        entries = tuple(
+            ModuleInsertionEntry.create(
+                namespace=namespace,
+                site="model.root",
+                recipe="dinkster.additional_model",
+                resources=model,
+                order=order,
+                activation=0.0,
+                clone_policy="copy",
+                share_policy="clone",
+                device_policy="resource",
+                offload_policy="resident",
+            )
+            for order, model in enumerate(models)
+        )
+        self.set_module_insertions(namespace, entries)
 
     def remove_additional_models(self, key: str):
-        if key in self.additional_models:
-            self.additional_models.pop(key)
+        self.set_module_insertions(f"additional:{key}", ())
 
     def get_additional_models_with_key(self, key: str):
-        return self.additional_models.get(key, [])
+        return list(self.additional_models.get(key, ()))
 
     def get_additional_models(self):
         all_models: list[ModelPatcher] = []
@@ -1529,10 +1582,6 @@ class ModelPatcher:
         self._materialize_module_insertions()
         if self._materialized_insertions:
             self.is_injected = True
-        for injections in self.injections.values():
-            for inj in injections:
-                inj.inject(self)
-                self.is_injected = True
         if self.is_injected:
             for callback in self.get_all_callbacks(CallbacksMP.ON_INJECT_MODEL):
                 callback(self)
@@ -1540,9 +1589,6 @@ class ModelPatcher:
     def eject_model(self):
         if not self.is_injected and not self._materialized_insertions:
             return
-        for injections in self.injections.values():
-            for inj in injections:
-                inj.eject(self)
         self.is_injected = False
         self._teardown_module_insertions()
         for callback in self.get_all_callbacks(CallbacksMP.ON_EJECT_MODEL):

@@ -9,6 +9,7 @@ import torch
 from dinkster_comfy.model_base import BaseModel
 from dinkster_comfy.model_patcher import LowVramPatch, ModelPatcher
 from dinkster_comfy.patch_program import ModuleInsertionEntry, PatchProgram
+from dinkster_comfy.patcher_extension import PatcherInjection
 
 
 def _program(value: torch.Tensor, *, target: str = "block.weight") -> PatchProgram:
@@ -341,10 +342,10 @@ def test_module_insertion_refuses_unknown_site_with_available_sites() -> None:
 
 
 def test_module_insertion_collision_is_refused() -> None:
-    program = PatchProgram().replace_module_insertions("first", (_insertion("first"),))
-
     with pytest.raises(ValueError, match="site, position, and order must be unique"):
-        program.replace_module_insertions("second", (_insertion("second"),))
+        PatchProgram().replace_module_insertions(
+            "motion", (_insertion("motion"), _insertion("motion"))
+        )
 
 
 def test_module_insertions_materialize_in_site_order_and_teardown_in_reverse() -> None:
@@ -407,6 +408,41 @@ def test_module_insertion_clone_derives_without_changing_parent() -> None:
     assert parent.get_module_insertions() == ()
     assert child.get_module_insertions() == (_insertion("motion"),)
     assert parent.patch_program.digest != child.patch_program.digest
+
+
+def test_injections_use_structural_program_materialization() -> None:
+    events: list[str] = []
+    patcher = _site_patcher()
+    injection = PatcherInjection(
+        inject=lambda _: events.append("inject"),
+        eject=lambda _: events.append("eject"),
+        resources={"recipe": "test"},
+    )
+
+    patcher.set_injections("test", [injection])
+    patcher.inject_model()
+    patcher.eject_model()
+
+    assert patcher.get_injections("test") == [injection]
+    assert events == ["inject", "eject"]
+    patcher.remove_injections("test")
+    assert patcher.get_injections("test") is None
+
+
+def test_additional_models_use_clone_scoped_program_resources() -> None:
+    parent = _site_patcher()
+    auxiliary = _site_patcher()
+    parent.set_additional_models("control", [auxiliary])
+
+    child = parent.clone()
+
+    assert parent.get_additional_models_with_key("control") == [auxiliary]
+    cloned_auxiliary = child.get_additional_models_with_key("control")[0]
+    assert cloned_auxiliary is not auxiliary
+    assert cloned_auxiliary.clone_base_uuid == auxiliary.clone_base_uuid
+    child.remove_additional_models("control")
+    assert child.get_additional_models_with_key("control") == []
+    assert parent.get_additional_models_with_key("control") == [auxiliary]
 
 
 def test_module_insertion_revalidates_resources_before_materialization() -> None:

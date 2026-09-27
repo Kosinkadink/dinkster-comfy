@@ -45,6 +45,11 @@ def _descriptor(
         if tensor_digests is None:
             tensor_digests = {}
         return {"tensor": _tensor_descriptor(value, tensor_digests)}
+    descriptor = getattr(value, "patch_program_descriptor", None)
+    if callable(descriptor):
+        return {
+            "resource": _descriptor(descriptor(), active, tensor_digests),
+        }
 
     if active is None:
         active = set()
@@ -453,7 +458,7 @@ class PatchProgram:
         )
         combined = (*retained, *replacements)
         keys = [
-            (entry.site, entry.position, entry.order)
+            (entry.namespace, entry.site, entry.position, entry.order)
             for entry in combined
             if isinstance(entry, ModuleInsertionEntry)
         ]
@@ -472,6 +477,20 @@ class PatchProgram:
             if isinstance(entry, ModuleInsertionEntry)
             and (namespace is None or entry.namespace == namespace)
         )
+
+    def clone_module_resources(self) -> PatchProgram:
+        entries = []
+        for entry in self.entries:
+            if not isinstance(entry, ModuleInsertionEntry):
+                entries.append(entry)
+                continue
+            resource = entry.resources.value
+            if entry.clone_policy == "copy":
+                resource = resource.clone()
+            entries.append(
+                dataclasses.replace(entry, resources=PatchResource.bind(resource))
+            )
+        return PatchProgram(tuple(entries))
 
     def replace_object(self, target: str, replacement: object) -> PatchProgram:
         entry = ObjectReplacementEntry.create(target=target, replacement=replacement)
