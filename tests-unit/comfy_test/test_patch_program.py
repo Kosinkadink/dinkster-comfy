@@ -6,7 +6,7 @@ from typing import Any, cast
 import pytest
 import torch
 
-from dinkster_comfy.model_patcher import ModelPatcher
+from dinkster_comfy.model_patcher import LowVramPatch, ModelPatcher
 from dinkster_comfy.patch_program import PatchProgram
 
 
@@ -162,6 +162,21 @@ def test_model_patcher_revalidates_before_each_materialization() -> None:
 
     with pytest.raises(RuntimeError, match="patch resource for 'weight' changed"):
         patcher.patch_weight_to_device("weight", return_weight=True)
+
+
+def test_low_vram_patch_validates_before_deferred_materialization() -> None:
+    model = torch.nn.Linear(2, 2, bias=False)
+    patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+    delta = torch.ones_like(model.weight)
+    patcher.add_patches({"weight": ("diff", (delta,))})
+    deferred = LowVramPatch(
+        "weight", patcher.patches, patcher.patch_program.validate_resources
+    )
+
+    delta[0, 0] = 2.0
+
+    with pytest.raises(RuntimeError, match="patch resource for 'weight' changed"):
+        deferred(model.weight.detach().clone())
 
 
 @pytest.mark.parametrize("strength", [float("inf"), float("-inf"), float("nan")])

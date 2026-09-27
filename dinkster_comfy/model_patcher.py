@@ -173,12 +173,19 @@ def string_to_seed(data):
 class LowVramPatch:
     is_lowvram_patch = True
 
-    def __init__(self, key, patches, convert_func=None, set_func=None):
+    def __init__(self, key, patches, validate, convert_func=None, set_func=None):
         self.key = key
         self.patches = patches
+        self.validate = validate
         self.convert_func = convert_func # TODO: remove
         self.set_func = set_func
         self.prepared_patches = None
+        self.validated = False
+
+    def validate_once(self):
+        if not self.validated:
+            self.validate(self.key)
+            self.validated = True
 
     def memory_required(self):
         counter = [0]
@@ -187,6 +194,7 @@ class LowVramPatch:
         return counter[0]
 
     def prepare(self, destination, stream, copy=True, commit=True):
+        self.validate(self.key)
         counter = [0]
         prepared_patches = [
             (patch[0], dinkster_comfy.lora.prefetch_prepared_value(patch[1], counter, destination, stream, copy), patch[2], patch[3], patch[4])
@@ -194,12 +202,16 @@ class LowVramPatch:
         ]
         if commit:
             self.prepared_patches = prepared_patches
+            self.validated = True
         return prepared_patches
 
     def clear_prepared(self):
         self.prepared_patches = None
+        self.validated = False
 
     def __call__(self, weight):
+        if self.prepared_patches is None:
+            self.validate_once()
         patches = self.prepared_patches if self.prepared_patches is not None else self.patches[self.key]
         return dinkster_comfy.lora.calculate_weight(patches, weight, self.key, intermediate_dtype=weight.dtype)
 
@@ -1048,14 +1060,14 @@ class ModelPatcher:
                             self.patch_weight_to_device(weight_key)
                         else:
                             _, set_func, convert_func = get_key_weight(self.model, weight_key)
-                            m.weight_function = [LowVramPatch(weight_key, self.patches, convert_func, set_func)]
+                            m.weight_function = [LowVramPatch(weight_key, self.patches, self.patch_program.validate_resources, convert_func, set_func)]
                             patch_counter += 1
                     if bias_key in self.patches:
                         if force_patch_weights or dinkster_comfy.lora.calculate_shape(self.patches[bias_key], m.bias, bias_key) != m.bias.shape:
                             self.patch_weight_to_device(bias_key)
                         else:
                             _, set_func, convert_func = get_key_weight(self.model, bias_key)
-                            m.bias_function = [LowVramPatch(bias_key, self.patches, convert_func, set_func)]
+                            m.bias_function = [LowVramPatch(bias_key, self.patches, self.patch_program.validate_resources, convert_func, set_func)]
                             patch_counter += 1
 
                     cast_weight = True
@@ -1245,14 +1257,14 @@ class ModelPatcher:
                                     self.patch_weight_to_device(weight_key)
                                 else:
                                     _, set_func, convert_func = get_key_weight(self.model, weight_key)
-                                    m.weight_function.append(LowVramPatch(weight_key, self.patches, convert_func, set_func))
+                                    m.weight_function.append(LowVramPatch(weight_key, self.patches, self.patch_program.validate_resources, convert_func, set_func))
                                     patch_counter += 1
                             if bias_key in self.patches:
                                 if force_patch_weights or dinkster_comfy.lora.calculate_shape(self.patches[bias_key], m.bias, bias_key) != m.bias.shape:
                                     self.patch_weight_to_device(bias_key)
                                 else:
                                     _, set_func, convert_func = get_key_weight(self.model, bias_key)
-                                    m.bias_function.append(LowVramPatch(bias_key, self.patches, convert_func, set_func))
+                                    m.bias_function.append(LowVramPatch(bias_key, self.patches, self.patch_program.validate_resources, convert_func, set_func))
                                     patch_counter += 1
                             cast_weight = True
 
@@ -1957,7 +1969,7 @@ class ModelPatcherDynamic(ModelPatcher):
                     if key in self.patches:
                         if dinkster_comfy.lora.calculate_shape(self.patches[key], weight, key) != weight.shape:
                             return (True, 0)
-                        lowvram_patch = LowVramPatch(key, self.patches)
+                        lowvram_patch = LowVramPatch(key, self.patches, self.patch_program.validate_resources)
                         lowvram_patch._pin_state = pin_state
                         setattr(m, param_key + "_lowvram_function", lowvram_patch)
                         num_patches += 1
