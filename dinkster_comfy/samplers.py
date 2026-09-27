@@ -17,7 +17,7 @@ import dinkster_comfy.sampler_helpers
 import dinkster_comfy.model_patcher
 import dinkster_comfy.patcher_extension
 import dinkster_comfy.hooks
-import dinkster_comfy.context_windows
+import dinkster_comfy.window_execution
 import dinkster_comfy.multigpu
 import dinkster_comfy.utils
 from dinkster_comfy.internal_logging import detail
@@ -206,10 +206,12 @@ def finalize_default_conds(model: 'BaseModel', hooked_to_run: dict[dinkster_comf
             hooked_to_run[p.hooks] += [(p, i)]
 
 def calc_cond_batch(model: BaseModel, conds: list[list[dict]], x_in: torch.Tensor, timestep, model_options: dict[str]):
-    handler: dinkster_comfy.context_windows.ContextHandlerABC = model_options.get("context_handler", None)
-    if handler is None or not handler.should_use_context(model, conds, x_in, timestep, model_options):
+    window_plan = model_options.get("window_plan")
+    if window_plan is None:
         return _calc_cond_batch_outer(model, conds, x_in, timestep, model_options)
-    return handler.execute(_calc_cond_batch_outer, model, conds, x_in, timestep, model_options)
+    if type(window_plan) is not dinkster_comfy.window_execution.WindowPlanExecutor:
+        raise TypeError("model_options['window_plan'] must be a WindowPlanExecutor")
+    return window_plan.execute(_calc_cond_batch_outer, model, conds, x_in, timestep, model_options)
 
 def _calc_cond_batch_outer(model: BaseModel, conds: list[list[dict]], x_in: torch.Tensor, timestep, model_options):
     executor = dinkster_comfy.patcher_extension.WrapperExecutor.new_executor(
