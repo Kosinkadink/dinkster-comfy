@@ -24,6 +24,7 @@ import logging
 import math
 import time
 import uuid
+from types import MappingProxyType
 from typing import Callable, Optional
 
 import torch
@@ -845,17 +846,20 @@ class ModelPatcher:
 
     @patches.setter
     def patches(self, patches):
-        self._set_patch_program(PatchProgram.from_weight_patches(patches))
+        program = PatchProgram.from_weight_patches(patches)
+        self._set_patch_program(program)
+        self.patches_uuid = program.digest
 
     def _set_patch_program(self, program):
         self.patch_program = program
-        self._compiled_patches = program.weight_patches()
+        patches = program.weight_patches()
+        self._compiled_patches = MappingProxyType({key: tuple(entries) for key, entries in patches.items()})
 
     def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
         with self.use_ejected():
             p = set()
             model_sd = self.model.state_dict()
-            program = self.patch_program
+            additions = []
             for k in patches:
                 offset = None
                 function = None
@@ -869,15 +873,9 @@ class ModelPatcher:
 
                 if key in model_sd:
                     p.add(k)
-                    program = program.append_weight_delta(
-                        target=key,
-                        patch=patches[k],
-                        strength_patch=strength_patch,
-                        strength_model=strength_model,
-                        offset=offset,
-                        function=function,
-                    )
+                    additions.append((key, patches[k], strength_patch, strength_model, offset, function))
 
+            program = self.patch_program.extend_weight_deltas(additions)
             self._set_patch_program(program)
             self.patches_uuid = program.digest
             return list(p)
@@ -902,7 +900,7 @@ class ModelPatcher:
                 convert_func = lambda a, **kwargs: a
 
             if k in self.patches:
-                p[k] = [(weight, convert_func)] + self.patches[k]
+                p[k] = [(weight, convert_func)] + list(self.patches[k])
             else:
                 p[k] = [(weight, convert_func)]
         return p

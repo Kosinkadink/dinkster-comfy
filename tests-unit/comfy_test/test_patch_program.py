@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import functools
+from typing import Any, cast
+
 import pytest
 import torch
 
@@ -93,6 +96,28 @@ def test_compiled_runtime_mapping_cannot_mutate_the_program() -> None:
     assert len(program.weight_patches()["block.weight"]) == 1
 
 
+def test_partial_patch_function_has_content_identity() -> None:
+    identity = functools.partial(torch.mul, other=1.0)
+    doubled = functools.partial(torch.mul, other=2.0)
+
+    first = PatchProgram().append_weight_delta(
+        target="block.weight",
+        patch=("diff", (torch.tensor([1.0]),)),
+        strength_patch=1.0,
+        strength_model=1.0,
+        function=identity,
+    )
+    second = PatchProgram().append_weight_delta(
+        target="block.weight",
+        patch=("diff", (torch.tensor([1.0]),)),
+        strength_patch=1.0,
+        strength_model=1.0,
+        function=doubled,
+    )
+
+    assert first.digest != second.digest
+
+
 def test_model_patcher_clone_derives_without_changing_parent() -> None:
     model = torch.nn.Linear(2, 2, bias=False)
     parent = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
@@ -108,6 +133,10 @@ def test_model_patcher_clone_derives_without_changing_parent() -> None:
     assert parent.patches == {}
     assert child.patches["weight"][0][0] == 0.5
     assert parent.patches_uuid != child.patches_uuid
+
+    immutable_patches = cast(Any, child.patches)
+    with pytest.raises(TypeError):
+        immutable_patches["weight"] = child.patches["weight"]
 
 
 @pytest.mark.parametrize("strength", [float("inf"), float("-inf"), float("nan")])

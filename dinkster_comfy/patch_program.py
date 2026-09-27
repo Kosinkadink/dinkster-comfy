@@ -1,27 +1,39 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import json
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 import torch
 
 
-def _tensor_descriptor(value: torch.Tensor) -> dict[str, object]:
-    tensor = value.detach().cpu().contiguous()
-    return {
-        "dtype": str(tensor.dtype),
-        "shape": list(tensor.shape),
-        "sha256": hashlib.sha256(
+def _tensor_descriptor(
+    value: torch.Tensor, tensor_digests: dict[int, str]
+) -> dict[str, object]:
+    identity = id(value)
+    digest = tensor_digests.get(identity)
+    if digest is None:
+        tensor = value.detach().cpu().contiguous()
+        digest = hashlib.sha256(
             tensor.reshape(-1).view(torch.uint8).numpy().tobytes()
-        ).hexdigest(),
+        ).hexdigest()
+        tensor_digests[identity] = digest
+    return {
+        "dtype": str(value.dtype),
+        "shape": list(value.shape),
+        "sha256": digest,
     }
 
 
-def _descriptor(value: object, active: set[int] | None = None) -> object:
+def _descriptor(
+    value: object,
+    active: set[int] | None = None,
+    tensor_digests: dict[int, str] | None = None,
+) -> object:
     if value is None or isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, float):
@@ -29,10 +41,14 @@ def _descriptor(value: object, active: set[int] | None = None) -> object:
             raise ValueError("patch program values must be finite")
         return 0.0 if value == 0.0 else value
     if isinstance(value, torch.Tensor):
-        return {"tensor": _tensor_descriptor(value)}
+        if tensor_digests is None:
+            tensor_digests = {}
+        return {"tensor": _tensor_descriptor(value, tensor_digests)}
 
     if active is None:
         active = set()
+    if tensor_digests is None:
+        tensor_digests = {}
     identity = id(value)
     if identity in active:
         raise ValueError("patch program values must not contain cycles")
@@ -41,36 +57,55 @@ def _descriptor(value: object, active: set[int] | None = None) -> object:
         if isinstance(value, Mapping):
             return {
                 "mapping": [
-                    [_descriptor(key, active), _descriptor(item, active)]
+                    [
+                        _descriptor(key, active, tensor_digests),
+                        _descriptor(item, active, tensor_digests),
+                    ]
                     for key, item in sorted(
                         value.items(), key=lambda pair: repr(pair[0])
                     )
                 ]
             }
         if isinstance(value, (set, frozenset)):
-            items = [_descriptor(item, active) for item in value]
+            items = [_descriptor(item, active, tensor_digests) for item in value]
             items.sort(key=lambda item: json.dumps(item, sort_keys=True))
             return {"set": items}
         if isinstance(value, (list, tuple)):
-            return {"sequence": [_descriptor(item, active) for item in value]}
+            return {
+                "sequence": [
+                    _descriptor(item, active, tensor_digests) for item in value
+                ]
+            }
         if dataclasses.is_dataclass(value) and not isinstance(value, type):
             return {
                 "class": f"{type(value).__module__}.{type(value).__qualname__}",
                 "fields": {
-                    item.name: _descriptor(getattr(value, item.name), active)
+                    item.name: _descriptor(
+                        getattr(value, item.name), active, tensor_digests
+                    )
                     for item in dataclasses.fields(value)
                     if item.compare
                 },
             }
-        if callable(value):
+        if isinstance(value, functools.partial):
             return {
-                "callable": f"{value.__module__}.{value.__qualname__}",
+                "partial": {
+                    "function": _descriptor(value.func, active, tensor_digests),
+                    "args": _descriptor(value.args, active, tensor_digests),
+                    "keywords": _descriptor(value.keywords, active, tensor_digests),
+                }
             }
+        if (
+            callable(value)
+            and hasattr(value, "__module__")
+            and hasattr(value, "__qualname__")
+        ):
+            return {"callable": f"{value.__module__}.{value.__qualname__}"}
         attributes = getattr(value, "__dict__", None)
         if attributes is not None:
             return {
                 "class": f"{type(value).__module__}.{type(value).__qualname__}",
-                "attributes": _descriptor(attributes, active),
+                "attributes": _descriptor(attributes, active, tensor_digests),
             }
     finally:
         active.remove(identity)
@@ -79,9 +114,9 @@ def _descriptor(value: object, active: set[int] | None = None) -> object:
     )
 
 
-def _digest(value: object) -> str:
+def _digest(value: object, tensor_digests: dict[int, str] | None = None) -> str:
     payload = json.dumps(
-        _descriptor(value),
+        _descriptor(value, tensor_digests=tensor_digests),
         allow_nan=False,
         ensure_ascii=True,
         separators=(",", ":"),
@@ -96,8 +131,10 @@ class PatchResource:
     value: object = field(compare=False, repr=False)
 
     @classmethod
-    def bind(cls, value: object) -> PatchResource:
-        return cls(identity=_digest(value), value=value)
+    def bind(
+        cls, value: object, tensor_digests: dict[int, str] | None = None
+    ) -> PatchResource:
+        return cls(identity=_digest(value, tensor_digests), value=value)
 
 
 @dataclass(frozen=True)
@@ -120,6 +157,7 @@ class WeightDeltaEntry:
         strength_model: float,
         offset: object = None,
         function: object = None,
+        tensor_digests: dict[int, str] | None = None,
     ) -> WeightDeltaEntry:
         strengths = {
             "strength_patch": float(strength_patch),
@@ -130,7 +168,7 @@ class WeightDeltaEntry:
                 raise ValueError(f"{name} must be finite")
         return cls(
             target=target,
-            patch=PatchResource.bind(patch),
+            patch=PatchResource.bind(patch, tensor_digests),
             strength_patch=0.0
             if strengths["strength_patch"] == 0.0
             else strengths["strength_patch"],
@@ -198,6 +236,25 @@ class PatchProgram:
         )
         return PatchProgram((*self.entries, entry))
 
+    def extend_weight_deltas(
+        self,
+        entries: Iterable[tuple[str, object, float, float, object, object]],
+    ) -> PatchProgram:
+        tensor_digests: dict[int, str] = {}
+        additions = tuple(
+            WeightDeltaEntry.create(
+                target=target,
+                patch=patch,
+                strength_patch=strength_patch,
+                strength_model=strength_model,
+                offset=offset,
+                function=function,
+                tensor_digests=tensor_digests,
+            )
+            for target, patch, strength_patch, strength_model, offset, function in entries
+        )
+        return PatchProgram((*self.entries, *additions))
+
     def weight_patches(
         self,
     ) -> dict[str, list[tuple[object, object, object, object, object]]]:
@@ -208,18 +265,13 @@ class PatchProgram:
 
     @classmethod
     def from_weight_patches(cls, patches: Mapping[str, list[tuple]]) -> PatchProgram:
-        program = cls()
+        additions = []
         for target, entries in patches.items():
             for entry in entries:
                 if len(entry) != 5:
                     raise ValueError("weight patch entries must contain five values")
                 strength_patch, patch, strength_model, offset, function = entry
-                program = program.append_weight_delta(
-                    target=target,
-                    patch=patch,
-                    strength_patch=strength_patch,
-                    strength_model=strength_model,
-                    offset=offset,
-                    function=function,
+                additions.append(
+                    (target, patch, strength_patch, strength_model, offset, function)
                 )
-        return program
+        return cls().extend_weight_deltas(additions)
