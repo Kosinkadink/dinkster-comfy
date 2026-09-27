@@ -1,8 +1,8 @@
-# Pytest Unit Tests
+# Library unit tests
 
-## Install test dependencies
+Install the package and test dependency, then run the retained pure-library tests:
 
-`pip install -r tests-unit/requirements.txt`
-
-## Run tests
-`pytest tests-unit/`
+```bash
+python -m pip install -e . pytest
+python -m pytest tests-unit
+```

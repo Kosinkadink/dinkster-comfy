@@ -2,8 +2,8 @@ from collections import defaultdict
 
 import torch
 
-from comfy.model_detection import detect_unet_config, model_config_from_unet, model_config_from_unet_config
-import comfy.supported_models
+from dinkster_comfy.model_detection import detect_unet_config, model_config_from_unet, model_config_from_unet_config
+import dinkster_comfy.supported_models
 
 
 def _freeze(value):
@@ -133,7 +133,7 @@ class TestModelDetection:
 
     def test_longcat_before_schnell_in_models_list(self):
         """LongCatImage must appear before FluxSchnell in the models list."""
-        models = comfy.supported_models.models
+        models = dinkster_comfy.supported_models.models
         longcat_idx = next(i for i, m in enumerate(models) if m.__name__ == "LongCatImage")
         schnell_idx = next(i for i, m in enumerate(models) if m.__name__ == "FluxSchnell")
         assert longcat_idx < schnell_idx, (
@@ -306,7 +306,7 @@ class TestModelDetection:
         ``unet_config`` and ``required_keys``. If two models share the same
         combination, ``BASE.matches`` cannot disambiguate between them and the
         first one in the list will always win."""
-        models = comfy.supported_models.models
+        models = dinkster_comfy.supported_models.models
         groups = defaultdict(list)
         for model in models:
             key = (_freeze(model.unet_config), _freeze(model.required_keys))

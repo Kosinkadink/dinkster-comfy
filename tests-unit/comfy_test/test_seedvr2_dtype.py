@@ -1,15 +1,15 @@
 import torch
 import torch.nn as nn
 
-from comfy.cli_args import args as cli_args
+from dinkster_comfy.cli_args import args as cli_args
 
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
-import comfy.sd
-import comfy.supported_models
-import comfy.ldm.seedvr.model as seedvr_model
-import comfy.ldm.seedvr.vae as seedvr_vae
+import dinkster_comfy.sd
+import dinkster_comfy.supported_models
+import dinkster_comfy.ldm.seedvr.model as seedvr_model
+import dinkster_comfy.ldm.seedvr.vae as seedvr_vae
 
 
 def test_seedvr2_fp16_manual_cast_only_for_bf16_device(monkeypatch):
@@ -17,16 +17,16 @@ def test_seedvr2_fp16_manual_cast_only_for_bf16_device(monkeypatch):
     fp16_device = object()
 
     monkeypatch.setattr(
-        comfy.supported_models.comfy.model_management,
+        dinkster_comfy.supported_models.dinkster_comfy.model_management,
         "should_use_bf16",
         lambda device=None: device is bf16_device,
     )
 
-    bf16_config = comfy.supported_models.SeedVR2({"image_model": "seedvr2"})
+    bf16_config = dinkster_comfy.supported_models.SeedVR2({"image_model": "seedvr2"})
     bf16_config.set_inference_dtype(torch.float16, None, device=bf16_device)
     assert bf16_config.manual_cast_dtype is torch.bfloat16
 
-    fp16_config = comfy.supported_models.SeedVR2({"image_model": "seedvr2"})
+    fp16_config = dinkster_comfy.supported_models.SeedVR2({"image_model": "seedvr2"})
     fp16_config.set_inference_dtype(torch.float16, None, device=fp16_device)
     assert fp16_config.manual_cast_dtype is None
 
