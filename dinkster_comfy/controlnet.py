@@ -24,6 +24,7 @@ import os
 import logging
 import copy
 import dinkster_comfy.utils
+from dinkster_comfy.contribution_gain import ContributionGain, GainTimeline
 import dinkster_comfy.model_management
 import dinkster_comfy.model_detection
 import dinkster_comfy.model_patcher
@@ -82,12 +83,11 @@ class ControlBase:
     def __init__(self):
         self.cond_hint_original = None
         self.cond_hint = None
-        self.strength = 1.0
-        self.timestep_percent_range = (0.0, 1.0)
+        self.contribution_gain = ContributionGain()
+        self.realized_contribution_gain = None
         self.latent_format = None
         self.vae = None
         self.global_average_pooling = False
-        self.timestep_range = None
         self.compression_ratio = 8
         self.upscale_algorithm = 'nearest-exact'
         self.extra_args = {}
@@ -103,8 +103,13 @@ class ControlBase:
 
     def set_cond_hint(self, cond_hint, strength=1.0, timestep_percent_range=(0.0, 1.0), vae=None, extra_concat=[]):
         self.cond_hint_original = cond_hint
-        self.strength = strength
-        self.timestep_percent_range = timestep_percent_range
+        timeline = GainTimeline.constant_gain()
+        if timestep_percent_range != (0.0, 1.0):
+            timeline = GainTimeline.active_range(*timestep_percent_range)
+        self.contribution_gain = ContributionGain(
+            timeline=timeline,
+            global_gain=strength,
+        )
         if self.latent_format is not None:
             if vae is None:
                 logging.warning("WARNING: no VAE provided to the controlnet apply node when this controlnet requires one.")
@@ -115,9 +120,17 @@ class ControlBase:
         return self
 
     def pre_run(self, model, percent_to_timestep_function):
-        self.timestep_range = (percent_to_timestep_function(self.timestep_percent_range[0]), percent_to_timestep_function(self.timestep_percent_range[1]))
         if self.previous_controlnet is not None:
             self.previous_controlnet.pre_run(model, percent_to_timestep_function)
+
+    def realize_gain(self, sigmas, model):
+        self.realized_contribution_gain = self.contribution_gain.realize(
+            sigmas, model.model_sampling.percent_to_sigma
+        )
+        if self.previous_controlnet is not None:
+            self.previous_controlnet.realize_gain(sigmas, model)
+        for control in self.multigpu_clones.values():
+            control.realize_gain(sigmas, model)
 
     def set_previous_controlnet(self, controlnet):
         self.previous_controlnet = controlnet
@@ -131,7 +144,7 @@ class ControlBase:
                 device_cnet.cleanup()
         self.cond_hint = None
         self.extra_concat = None
-        self.timestep_range = None
+        self.realized_contribution_gain = None
 
     def get_models(self):
         out = []
@@ -168,8 +181,7 @@ class ControlBase:
 
     def copy_to(self, c: ControlBase):
         c.cond_hint_original = self.cond_hint_original
-        c.strength = self.strength
-        c.timestep_percent_range = self.timestep_percent_range
+        c.contribution_gain = self.contribution_gain
         c.global_average_pooling = self.global_average_pooling
         c.compression_ratio = self.compression_ratio
         c.upscale_algorithm = self.upscale_algorithm
@@ -188,7 +200,7 @@ class ControlBase:
             return self.previous_controlnet.inference_memory_requirements(dtype)
         return 0
 
-    def control_merge(self, control, control_prev, output_dtype):
+    def control_merge(self, control, control_prev, output_dtype, timestep, transformer_options):
         out = {'input':[], 'middle':[], 'output': []}
 
         for key in control:
@@ -202,10 +214,11 @@ class ControlBase:
 
                     if x not in applied_to: #memory saving strategy, allow shared tensors and only apply strength to shared tensors once
                         applied_to.add(x)
+                        gain = self._effective_gain(timestep, transformer_options, f"{key}.{i}", x)
                         if self.strength_type == StrengthType.CONSTANT:
-                            x *= self.strength
+                            x *= gain
                         elif self.strength_type == StrengthType.LINEAR_UP:
-                            x *= (self.strength ** float(len(control_output) - i))
+                            x *= gain ** float(len(control_output) - i)
 
                     if output_dtype is not None and x.dtype != output_dtype:
                         x = x.to(output_dtype)
@@ -228,6 +241,26 @@ class ControlBase:
                             else:
                                 o[i] = prev_val + o[i] #TODO: change back to inplace add if shared tensors stop being an issue
         return out
+
+    def _effective_gain(self, timestep, transformer_options, site, output):
+        table = self.realized_contribution_gain
+        if table is None:
+            return 1.0
+        lanes = transformer_options.get("cond_or_uncond", ())
+        if table.lane_gains and lanes:
+            lane_names = tuple("positive" if lane == 0 else "negative" for lane in lanes)
+            values = [table.scalar_gain(timestep, site=site, lane=lane) for lane in lane_names]
+            repeats = output.shape[0] // len(values)
+            gain = torch.tensor(values, device=output.device, dtype=output.dtype).repeat_interleave(repeats)
+            gain = gain.reshape((output.shape[0],) + (1,) * (output.ndim - 1))
+        else:
+            gain = table.scalar_gain(timestep, site=site)
+        for mask in table.effect_masks:
+            mask = mask.to(device=output.device, dtype=output.dtype)
+            if mask.ndim == output.ndim - 1:
+                mask = mask.unsqueeze(1)
+            gain = gain * mask
+        return gain
 
     def set_extra_arg(self, argument, value=None):
         self.extra_args[argument] = value
@@ -256,12 +289,8 @@ class ControlNet(ControlBase):
         if self.previous_controlnet is not None:
             control_prev = self.previous_controlnet.get_control(x_noisy, t, cond, batched_number, transformer_options)
 
-        if self.timestep_range is not None:
-            if t[0] > self.timestep_range[0] or t[0] < self.timestep_range[1]:
-                if control_prev is not None:
-                    return control_prev
-                else:
-                    return None
+        if self.realized_contribution_gain is not None and self.realized_contribution_gain.scalar_gain(t) == 0.0:
+            return control_prev
 
         dtype = self.control_model.dtype
         if self.manual_cast_dtype is not None:
@@ -311,7 +340,7 @@ class ControlNet(ControlBase):
         x_noisy = self.model_sampling_current.calculate_input(t, x_noisy)
 
         control = self.control_model(x=x_noisy.to(dtype), hint=self.cond_hint, timesteps=timestep.to(dtype), context=dinkster_comfy.model_management.cast_to_device(context, x_noisy.device, dtype), **extra)
-        return self.control_merge(control, control_prev, output_dtype=None)
+        return self.control_merge(control, control_prev, output_dtype=None, timestep=t, transformer_options=transformer_options)
 
     def copy(self):
         c = ControlNet(None, global_average_pooling=self.global_average_pooling, load_device=self.load_device, manual_cast_dtype=self.manual_cast_dtype)
@@ -343,16 +372,14 @@ class ControlNet(ControlBase):
 
 
 class QwenFunControlNet(ControlNet):
-    def get_control(self, x_noisy, t, cond, batched_number, transformer_options):
-        # Fun checkpoints are more sensitive to high strengths in the generic
-        # ControlNet merge path. Use a soft response curve so strength=1.0 stays
-        # unchanged while >1 grows more gently.
-        original_strength = self.strength
-        self.strength = math.sqrt(max(self.strength, 0.0))
-        try:
-            return super().get_control(x_noisy, t, cond, batched_number, transformer_options)
-        finally:
-            self.strength = original_strength
+    def set_cond_hint(self, cond_hint, strength=1.0, timestep_percent_range=(0.0, 1.0), vae=None, extra_concat=[]):
+        return super().set_cond_hint(
+            cond_hint,
+            math.sqrt(max(strength, 0.0)),
+            timestep_percent_range,
+            vae,
+            extra_concat,
+        )
 
     def pre_run(self, model, percent_to_timestep_function):
         super().pre_run(model, percent_to_timestep_function)
@@ -917,12 +944,8 @@ class T2IAdapter(ControlBase):
         if self.previous_controlnet is not None:
             control_prev = self.previous_controlnet.get_control(x_noisy, t, cond, batched_number, transformer_options)
 
-        if self.timestep_range is not None:
-            if t[0] > self.timestep_range[0] or t[0] < self.timestep_range[1]:
-                if control_prev is not None:
-                    return control_prev
-                else:
-                    return None
+        if self.realized_contribution_gain is not None and self.realized_contribution_gain.scalar_gain(t) == 0.0:
+            return control_prev
 
         if self.cond_hint is None or x_noisy.shape[2] * self.compression_ratio != self.cond_hint.shape[2] or x_noisy.shape[3] * self.compression_ratio != self.cond_hint.shape[3]:
             if self.cond_hint is not None:
@@ -945,7 +968,7 @@ class T2IAdapter(ControlBase):
         for k in self.control_input:
             control_input[k] = list(map(lambda a: None if a is None else a.clone(), self.control_input[k]))
 
-        return self.control_merge(control_input, control_prev, x_noisy.dtype)
+        return self.control_merge(control_input, control_prev, x_noisy.dtype, t, transformer_options)
 
     def copy(self):
         c = T2IAdapter(self.t2i_model, self.channels_in, self.compression_ratio, self.upscale_algorithm)

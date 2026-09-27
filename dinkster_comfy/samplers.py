@@ -20,6 +20,7 @@ import dinkster_comfy.hooks
 import dinkster_comfy.window_execution
 import dinkster_comfy.multigpu
 import dinkster_comfy.utils
+from dinkster_comfy.contribution_gain import ContributionGain, GainTimeline
 from dinkster_comfy.internal_logging import detail
 from dinkster_comfy.res4lyf_sampler import RES4LYF_SAMPLER_NAMES, sampler_function as res4lyf_sampler_function
 import scipy.stats
@@ -34,24 +35,19 @@ def add_area_dims(area, num_dims):
 def get_area_and_mult(conds, x_in, timestep_in):
     dims = tuple(x_in.shape[2:])
     area = None
-    strength = 1.0
-
-    if 'timestep_start' in conds:
-        timestep_start = conds['timestep_start']
-        if timestep_in[0] > timestep_start:
-            return None
-    if 'timestep_end' in conds:
-        timestep_end = conds['timestep_end']
-        if timestep_in[0] < timestep_end:
-            return None
+    gain_table = conds.get("realized_contribution_gain")
+    strength = 1.0 if gain_table is None else gain_table.scalar_gain(
+        timestep_in,
+        site="conditioning",
+        lane=conds.get("guidance_lane"),
+    )
+    if strength == 0.0:
+        return None
     if 'area' in conds:
         area = list(conds['area'])
         area = add_area_dims(area, len(dims))
         if (len(area) // 2) > len(dims):
             area = area[:len(dims)] + area[len(area) // 2:(len(area) // 2) + len(dims)]
-
-    if 'strength' in conds:
-        strength = conds['strength']
 
     input_x = x_in
     if area is not None:
@@ -62,10 +58,10 @@ def get_area_and_mult(conds, x_in, timestep_in):
     if 'mask' in conds:
         # Scale the mask to the size of the input
         # The mask should have been resized as we began the sampling process
-        mask_strength = 1.0
-        if "mask_strength" in conds:
-            mask_strength = conds["mask_strength"]
-        mask = conds['mask']
+        masks = gain_table.effect_masks if gain_table is not None and gain_table.effect_masks else (conds['mask'],)
+        mask = masks[0]
+        for effect_mask in masks[1:]:
+            mask = mask * effect_mask
         # assert (mask.shape[1:] == x_in.shape[2:])
 
         mask = mask[:input_x.shape[0]]
@@ -73,7 +69,6 @@ def get_area_and_mult(conds, x_in, timestep_in):
             for i in range(len(dims)):
                 mask = mask.narrow(i + 1, area[len(dims) + i], area[i])
 
-        mask = mask * mask_strength
         mask = mask.unsqueeze(1).repeat((input_x.shape[0] // mask.shape[0], input_x.shape[1]) + (1, ) * (mask.ndim - 1))
     else:
         mask = torch.ones_like(input_x)
@@ -783,16 +778,19 @@ def resolve_areas_and_cond_masks_multidim(conditions, dims, device):
                 conditions[i] = c
 
         if 'mask' in c:
-            mask = c['mask']
-            mask = mask.to(device=device)
             modified = c.copy()
-            if len(mask.shape) == len(dims):
-                mask = mask.unsqueeze(0)
-            if mask.shape[1:] != dims:
-                if mask.ndim < 4:
-                    mask = dinkster_comfy.utils.common_upscale(mask.unsqueeze(1), dims[-1], dims[-2], 'bilinear', 'none').squeeze(1)
-                else:
-                    mask = dinkster_comfy.utils.common_upscale(mask, dims[-1], dims[-2], 'bilinear', 'none')
+            effect_masks = []
+            for mask in c.get("effect_masks", (c['mask'],)):
+                mask = mask.to(device=device)
+                if len(mask.shape) == len(dims):
+                    mask = mask.unsqueeze(0)
+                if mask.shape[1:] != dims:
+                    if mask.ndim < 4:
+                        mask = dinkster_comfy.utils.common_upscale(mask.unsqueeze(1), dims[-1], dims[-2], 'bilinear', 'none').squeeze(1)
+                    else:
+                        mask = dinkster_comfy.utils.common_upscale(mask, dims[-1], dims[-2], 'bilinear', 'none')
+                effect_masks.append(mask)
+            mask = effect_masks[0]
 
             if modified.get("set_area_to_bounds", False): #TODO: handle dim != 2
                 bounds = torch.max(torch.abs(mask),dim=0).values.unsqueeze(0)
@@ -809,6 +807,7 @@ def resolve_areas_and_cond_masks_multidim(conditions, dims, device):
                     modified['area'] = area
 
             modified['mask'] = mask
+            modified['effect_masks'] = tuple(effect_masks)
             conditions[i] = modified
 
 def resolve_areas_and_cond_masks(conditions, h, w, device):
@@ -858,31 +857,6 @@ def create_cond_with_same_area_if_none(conds, c):
     out = c.copy()
     out['model_conds'] = smallest['model_conds'].copy() #TODO: which fields should be copied?
     conds += [out]
-
-def calculate_start_end_timesteps(model, conds):
-    s = model.model_sampling
-    for t in range(len(conds)):
-        x = conds[t]
-
-        timestep_start = None
-        timestep_end = None
-        # handle clip hook schedule, if needed
-        if 'clip_start_percent' in x:
-            timestep_start = s.percent_to_sigma(max(x['clip_start_percent'], x.get('start_percent', 0.0)))
-            timestep_end = s.percent_to_sigma(min(x['clip_end_percent'], x.get('end_percent', 1.0)))
-        else:
-            if 'start_percent' in x:
-                timestep_start = s.percent_to_sigma(x['start_percent'])
-            if 'end_percent' in x:
-                timestep_end = s.percent_to_sigma(x['end_percent'])
-
-        if (timestep_start is not None) or (timestep_end is not None):
-            n = x.copy()
-            if (timestep_start is not None):
-                n['timestep_start'] = timestep_start
-            if (timestep_end is not None):
-                n['timestep_end'] = timestep_end
-            conds[t] = n
 
 def pre_run_control(model, conds):
     s = model.model_sampling
@@ -1043,9 +1017,6 @@ def process_conds(model, noise, conds, device, latent_image=None, denoise_mask=N
         conds[k] = conds[k][:]
         resolve_areas_and_cond_masks_multidim(conds[k], noise.shape[2:], device)
 
-    for k in conds:
-        calculate_start_end_timesteps(model, conds[k])
-
     if hasattr(model, 'extra_conds'):
         for k in conds:
             conds[k] = encode_model_conds(model.extra_conds, conds[k], noise, device, k, latent_image=latent_image, denoise_mask=denoise_mask, seed=seed, latent_shapes=latent_shapes)
@@ -1074,6 +1045,38 @@ def process_conds(model, noise, conds, device, latent_image=None, denoise_mask=N
                 apply_empty_x_to_equal_area(positive, conds[k], 'gligen', lambda cond_cnets, x: cond_cnets[x])
 
     return conds
+
+
+def realize_contribution_gains(model, conds, sigmas):
+    controls = set()
+    for lane, conditioning in conds.items():
+        for metadata in conditioning:
+            gain = metadata.pop("contribution_gain", ContributionGain())
+            gain = gain.scaled(metadata.pop("strength", 1.0))
+            gain = gain.scaled(metadata.pop("mask_strength", 1.0))
+            start = metadata.pop("start_percent", 0.0)
+            end = metadata.pop("end_percent", 1.0)
+            if "clip_start_percent" in metadata:
+                start = max(start, metadata["clip_start_percent"])
+                end = min(end, metadata["clip_end_percent"])
+            if start != 0.0 or end != 1.0:
+                gain = gain.with_timeline(GainTimeline.active_range(start, end))
+            effect_masks = metadata.pop("effect_masks", ())
+            if effect_masks:
+                gain = gain.with_effect_masks(effect_masks)
+            metadata["guidance_lane"] = lane
+            metadata["realized_contribution_gain"] = gain.realize(
+                sigmas, model.model_sampling.percent_to_sigma
+            )
+            control = metadata.get("control")
+            if control is not None and id(control) not in controls:
+                control.realize_gain(sigmas, model)
+                controls.add(id(control))
+            hooks = metadata.get("hooks")
+            if hooks is None:
+                continue
+            for hook in hooks.hooks:
+                hook.realize_gain(sigmas, model)
 
 
 def preprocess_conds_hooks(conds: dict[str, list[dict[str]]]):
@@ -1227,6 +1230,7 @@ class CFGGuider:
             latent_image = self.inner_model.process_latent_in(latent_image)
 
         self.conds = process_conds(self.inner_model, noise, self.conds, device, latent_image, denoise_mask, seed, latent_shapes=latent_shapes)
+        realize_contribution_gains(self.inner_model, self.conds, sigmas)
 
         extra_model_options = dinkster_comfy.model_patcher.create_model_options_clone(self.model_options)
         extra_model_options.setdefault("transformer_options", {})["sample_sigmas"] = sigmas
