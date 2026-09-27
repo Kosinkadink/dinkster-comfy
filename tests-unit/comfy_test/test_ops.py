@@ -21,7 +21,7 @@ def test_cuda_sdpa_initialization_reapplies_declared_order_once(monkeypatch):
         calls.append(("set", order))
 
     monkeypatch.setattr(ops, "_sdpa_cuda_priority_initialized", False)
-    monkeypatch.setattr(ops, "SDPA_BACKEND_PRIORITY", [1, 3, 2, 0])
+    monkeypatch.setattr(ops, "SDPA_BACKEND_PRIORITY", [1, 3, 2, 0], raising=False)
     monkeypatch.setattr(torch, "_fused_sdp_choice", choose)
     monkeypatch.setattr(torch._C, "_get_sdp_priority_order", get_order)
     monkeypatch.setattr(torch._C, "_set_sdp_priority_order", set_order)
