@@ -355,6 +355,12 @@ class ModelPatcher:
             self.model.device = offload_device
 
         self._set_patch_program(PatchProgram())
+        self.patch_site_map = MappingProxyType(
+            dict(getattr(self.model, "patch_site_map", {}))
+        )
+        self.patch_materializers = {}
+        self._materialized_insertions = []
+        self._patch_scratch = {}
         self.backup = {}
         self.backup_buffers = {}
         self.object_patches = {}
@@ -451,6 +457,8 @@ class ModelPatcher:
 
         n = class_(model_override[0], self.load_device, self.offload_device, self.model_size(), weight_inplace_update=self.weight_inplace_update, fast_disk=self.fast_disk)
         n._set_patch_program(self.patch_program)
+        n.patch_site_map = self.patch_site_map
+        n.patch_materializers = self.patch_materializers.copy()
         n.patches_uuid = self.patches_uuid
 
         n.object_patches = self.object_patches.copy()
@@ -668,6 +676,88 @@ class ModelPatcher:
         if "patches" not in to:
             to["patches"] = {}
         to["patches"][name] = to["patches"].get(name, []) + [patch]
+
+    def register_patch_materializer(self, recipe, materializer):
+        if not recipe:
+            raise ValueError("module insertion recipe must not be empty")
+        if not callable(getattr(materializer, "create_handle", None)):
+            raise TypeError("patch materializer must define create_handle")
+        if not callable(getattr(materializer, "materialize", None)):
+            raise TypeError("patch materializer must define materialize")
+        if not callable(getattr(materializer, "teardown", None)):
+            raise TypeError("patch materializer must define teardown")
+        existing = self.patch_materializers.get(recipe)
+        if existing is not None and existing is not materializer:
+            raise ValueError(f"patch materializer already registered for '{recipe}'")
+        self.patch_materializers[recipe] = materializer
+
+    def set_module_insertions(self, namespace, entries):
+        entries = tuple(entries)
+        available = tuple(self.patch_site_map)
+        for entry in entries:
+            if entry.namespace != namespace:
+                raise ValueError("module insertion namespace does not match replacement key")
+            if entry.site not in self.patch_site_map:
+                raise ValueError(
+                    f"unknown module insertion site '{entry.site}'; available sites: {available}"
+                )
+            if entry.recipe not in self.patch_materializers:
+                raise ValueError(
+                    f"module insertion recipe '{entry.recipe}' is not registered"
+                )
+        self._set_patch_program(
+            self.patch_program.replace_module_insertions(namespace, entries)
+        )
+        self.patches_uuid = self.patch_program.digest
+
+    def get_module_insertions(self, namespace=None):
+        return self.patch_program.module_insertions(namespace)
+
+    def _module_insertion_sort_key(self, entry):
+        site = self.patch_site_map[entry.site]
+        site_order = site.get("order", 0) if isinstance(site, dict) else 0
+        position_order = {"before": 0, "replace": 1, "after": 2}
+        return (site_order, position_order[entry.position], entry.order, entry.namespace)
+
+    def _materialize_module_insertions(self):
+        if self._materialized_insertions:
+            return
+        entries = sorted(
+            (
+                entry
+                for entry in self.patch_program.module_insertions()
+                if entry.activation != 0.0
+            ),
+            key=self._module_insertion_sort_key,
+        )
+        try:
+            for entry in entries:
+                entry.validate_resources()
+                materializer = self.patch_materializers[entry.recipe]
+                handle = materializer.create_handle(
+                    self,
+                    self.patch_site_map[entry.site],
+                    entry,
+                    self._patch_scratch.setdefault(entry.namespace, {}),
+                )
+                self._materialized_insertions.append((materializer, handle))
+                materializer.materialize(self, handle)
+        except Exception:
+            self._teardown_module_insertions()
+            raise
+
+    def _teardown_module_insertions(self):
+        error = None
+        for materializer, handle in reversed(self._materialized_insertions):
+            try:
+                materializer.teardown(self, handle)
+            except Exception as exc:
+                if error is None:
+                    error = exc
+        self._materialized_insertions.clear()
+        self._patch_scratch.clear()
+        if error is not None:
+            raise error
 
     def set_model_patch_replace(self, patch, name, block_name, number, transformer_index=None):
         self.model_options = set_model_options_patch_replace(self.model_options, patch, name, block_name, number, transformer_index=transformer_index)
@@ -1447,6 +1537,9 @@ class ModelPatcher:
     def inject_model(self):
         if self.is_injected or self.skip_injection:
             return
+        self._materialize_module_insertions()
+        if self._materialized_insertions:
+            self.is_injected = True
         for injections in self.injections.values():
             for inj in injections:
                 inj.inject(self)
@@ -1456,12 +1549,13 @@ class ModelPatcher:
                 callback(self)
 
     def eject_model(self):
-        if not self.is_injected:
+        if not self.is_injected and not self._materialized_insertions:
             return
         for injections in self.injections.values():
             for inj in injections:
                 inj.eject(self)
         self.is_injected = False
+        self._teardown_module_insertions()
         for callback in self.get_all_callbacks(CallbacksMP.ON_EJECT_MODEL):
             callback(self)
 

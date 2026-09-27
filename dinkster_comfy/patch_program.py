@@ -7,7 +7,6 @@ import json
 import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-
 import torch
 
 
@@ -204,8 +203,100 @@ class WeightDeltaEntry:
 
 
 @dataclass(frozen=True)
+class ModuleInsertionEntry:
+    namespace: str
+    site: str
+    recipe: str
+    order: int
+    position: str
+    activation: float
+    resources: PatchResource
+    clone_policy: str
+    share_policy: str
+    device_policy: str
+    offload_policy: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        namespace: str,
+        site: str,
+        recipe: str,
+        resources: object = None,
+        order: int = 0,
+        position: str = "after",
+        activation: float = 1.0,
+        clone_policy: str = "derive",
+        share_policy: str = "execution",
+        device_policy: str = "model",
+        offload_policy: str = "model",
+    ) -> ModuleInsertionEntry:
+        if not namespace:
+            raise ValueError("module insertion namespace must not be empty")
+        if not site:
+            raise ValueError("module insertion site must not be empty")
+        if not recipe:
+            raise ValueError("module insertion recipe must not be empty")
+        if position not in ("before", "after", "replace"):
+            raise ValueError(
+                "module insertion position must be before, after, or replace"
+            )
+        activation = float(activation)
+        if not math.isfinite(activation):
+            raise ValueError("module insertion activation must be finite")
+        policies = {
+            "clone_policy": (clone_policy, ("derive", "copy")),
+            "share_policy": (share_policy, ("execution", "clone")),
+            "device_policy": (device_policy, ("model", "resource")),
+            "offload_policy": (offload_policy, ("model", "resident")),
+        }
+        for name, (value, choices) in policies.items():
+            if value not in choices:
+                raise ValueError(f"unsupported {name}: {value}")
+        return cls(
+            namespace=namespace,
+            site=site,
+            recipe=recipe,
+            order=int(order),
+            position=position,
+            activation=0.0 if activation == 0.0 else activation,
+            resources=PatchResource.bind(resources),
+            clone_policy=clone_policy,
+            share_policy=share_policy,
+            device_policy=device_policy,
+            offload_policy=offload_policy,
+        )
+
+    def descriptor(self) -> dict[str, object]:
+        return {
+            "kind": "module_insertion",
+            "namespace": self.namespace,
+            "site": self.site,
+            "recipe": self.recipe,
+            "order": self.order,
+            "position": self.position,
+            "activation": self.activation,
+            "resources": self.resources.identity,
+            "clone_policy": self.clone_policy,
+            "share_policy": self.share_policy,
+            "device_policy": self.device_policy,
+            "offload_policy": self.offload_policy,
+        }
+
+    def validate_resources(self) -> None:
+        if self.resources.identity != _digest(self.resources.value):
+            raise RuntimeError(
+                f"module insertion resources for '{self.namespace}' changed after binding"
+            )
+
+
+PatchEntry = WeightDeltaEntry | ModuleInsertionEntry
+
+
+@dataclass(frozen=True)
 class PatchProgram:
-    entries: tuple[WeightDeltaEntry, ...] = ()
+    entries: tuple[PatchEntry, ...] = ()
 
     @property
     def digest(self) -> str:
@@ -221,6 +312,10 @@ class PatchProgram:
     def validate_resources(self, target: str | None = None) -> None:
         tensor_digests: dict[int, str] = {}
         for entry in self.entries:
+            if isinstance(entry, ModuleInsertionEntry):
+                if target is None:
+                    entry.validate_resources()
+                continue
             if target is not None and entry.target != target:
                 continue
             if entry.patch.identity != _digest(entry.patch.value, tensor_digests):
@@ -278,8 +373,47 @@ class PatchProgram:
     ) -> dict[str, list[tuple[object, object, object, object, object]]]:
         patches: dict[str, list[tuple[object, object, object, object, object]]] = {}
         for entry in self.entries:
+            if not isinstance(entry, WeightDeltaEntry):
+                continue
             patches.setdefault(entry.target, []).append(entry.runtime_tuple())
         return patches
+
+    def replace_module_insertions(
+        self, namespace: str, entries: Iterable[ModuleInsertionEntry]
+    ) -> PatchProgram:
+        replacements = tuple(entries)
+        if any(entry.namespace != namespace for entry in replacements):
+            raise ValueError(
+                "module insertion namespace does not match replacement key"
+            )
+        retained = tuple(
+            entry
+            for entry in self.entries
+            if not (
+                isinstance(entry, ModuleInsertionEntry) and entry.namespace == namespace
+            )
+        )
+        combined = (*retained, *replacements)
+        keys = [
+            (entry.site, entry.position, entry.order)
+            for entry in combined
+            if isinstance(entry, ModuleInsertionEntry)
+        ]
+        if len(keys) != len(set(keys)):
+            raise ValueError(
+                "module insertion site, position, and order must be unique"
+            )
+        return PatchProgram(combined)
+
+    def module_insertions(
+        self, namespace: str | None = None
+    ) -> tuple[ModuleInsertionEntry, ...]:
+        return tuple(
+            entry
+            for entry in self.entries
+            if isinstance(entry, ModuleInsertionEntry)
+            and (namespace is None or entry.namespace == namespace)
+        )
 
     @classmethod
     def from_weight_patches(cls, patches: Mapping[str, list[tuple]]) -> PatchProgram:

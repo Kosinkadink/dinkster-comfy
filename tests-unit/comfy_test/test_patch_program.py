@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from dinkster_comfy.model_patcher import LowVramPatch, ModelPatcher
-from dinkster_comfy.patch_program import PatchProgram
+from dinkster_comfy.patch_program import ModuleInsertionEntry, PatchProgram
 
 
 def _program(value: torch.Tensor, *, target: str = "block.weight") -> PatchProgram:
@@ -204,3 +204,169 @@ def test_non_finite_strength_is_refused(strength: float) -> None:
             strength_patch=strength,
             strength_model=1.0,
         )
+
+
+def _insertion(
+    namespace: str,
+    *,
+    site: str = "down.0",
+    recipe: str = "test.module",
+    order: int = 0,
+    resources: object = None,
+) -> ModuleInsertionEntry:
+    return ModuleInsertionEntry.create(
+        namespace=namespace,
+        site=site,
+        recipe=recipe,
+        order=order,
+        resources=resources,
+    )
+
+
+class _Materializer:
+    def __init__(self, events: list[str], *, fail: bool = False):
+        self.events = events
+        self.fail = fail
+
+    def create_handle(self, patcher, site, entry, scratch):
+        return entry.namespace, site["path"], scratch, entry.resources.value
+
+    def materialize(self, patcher, handle):
+        namespace, path, scratch, resources = handle
+        self.events.append(f"materialize:{namespace}:{path}")
+        scratch["active"] = resources
+        if self.fail:
+            raise RuntimeError("materialization failed")
+
+    def teardown(self, patcher, handle):
+        namespace, _, scratch, _ = handle
+        scratch.pop("active", None)
+        self.events.append(f"teardown:{namespace}")
+
+
+def _site_patcher() -> ModelPatcher:
+    model = torch.nn.Linear(2, 2, bias=False)
+    model.patch_site_map = {
+        "down.0": {"path": "down_blocks.0", "order": 0, "dimensions": (2, 2)},
+        "mid.0": {"path": "mid_block", "order": 1, "dimensions": (2, 2)},
+        "up.0": {"path": "up_blocks.0", "order": 2, "dimensions": (2, 2)},
+    }
+    return ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+
+
+def test_module_insertion_identity_covers_structural_inputs() -> None:
+    base = _insertion("motion", resources={"weight": torch.tensor([1.0])})
+    changed_site = ModuleInsertionEntry.create(
+        namespace="motion",
+        site="mid.0",
+        recipe="test.module",
+        resources={"weight": torch.tensor([1.0])},
+    )
+    changed_activation = ModuleInsertionEntry.create(
+        namespace="motion",
+        site="down.0",
+        recipe="test.module",
+        activation=0.5,
+        resources={"weight": torch.tensor([1.0])},
+    )
+    changed_resource = _insertion("motion", resources={"weight": torch.tensor([2.0])})
+
+    digests = {
+        PatchProgram((entry,)).digest
+        for entry in (base, changed_site, changed_activation, changed_resource)
+    }
+    assert len(digests) == 4
+
+
+def test_module_insertion_refuses_unknown_site_with_available_sites() -> None:
+    patcher = _site_patcher()
+    materializer = _Materializer([])
+    patcher.register_patch_materializer("test.module", materializer)
+
+    with pytest.raises(
+        ValueError, match="unknown module insertion site 'other'; available sites"
+    ):
+        patcher.set_module_insertions("motion", (_insertion("motion", site="other"),))
+
+
+def test_module_insertion_collision_is_refused() -> None:
+    program = PatchProgram().replace_module_insertions("first", (_insertion("first"),))
+
+    with pytest.raises(ValueError, match="site, position, and order must be unique"):
+        program.replace_module_insertions("second", (_insertion("second"),))
+
+
+def test_module_insertions_materialize_in_site_order_and_teardown_in_reverse() -> None:
+    events: list[str] = []
+    patcher = _site_patcher()
+    materializer = _Materializer(events)
+    patcher.register_patch_materializer("test.module", materializer)
+    patcher.set_module_insertions(
+        "modules",
+        (
+            _insertion("modules", site="up.0", order=1),
+            _insertion("modules", site="down.0", order=2),
+        ),
+    )
+
+    patcher.inject_model()
+    patcher.eject_model()
+
+    assert events == [
+        "materialize:modules:down_blocks.0",
+        "materialize:modules:up_blocks.0",
+        "teardown:modules",
+        "teardown:modules",
+    ]
+    assert patcher._patch_scratch == {}
+
+
+def test_module_insertion_failure_rolls_back_materialized_entries() -> None:
+    events: list[str] = []
+    patcher = _site_patcher()
+    patcher.register_patch_materializer("test.ok", _Materializer(events))
+    patcher.register_patch_materializer("test.fail", _Materializer(events, fail=True))
+    patcher.set_module_insertions(
+        "ok", (_insertion("ok", recipe="test.ok", site="down.0"),)
+    )
+    patcher.set_module_insertions(
+        "fail", (_insertion("fail", recipe="test.fail", site="mid.0"),)
+    )
+
+    with pytest.raises(RuntimeError, match="materialization failed"):
+        patcher.inject_model()
+
+    assert events == [
+        "materialize:ok:down_blocks.0",
+        "materialize:fail:mid_block",
+        "teardown:fail",
+        "teardown:ok",
+    ]
+    assert patcher._materialized_insertions == []
+    assert patcher._patch_scratch == {}
+
+
+def test_module_insertion_clone_derives_without_changing_parent() -> None:
+    parent = _site_patcher()
+    materializer = _Materializer([])
+    parent.register_patch_materializer("test.module", materializer)
+    child = parent.clone()
+    child.set_module_insertions("motion", (_insertion("motion"),))
+
+    assert parent.get_module_insertions() == ()
+    assert child.get_module_insertions() == (_insertion("motion"),)
+    assert parent.patch_program.digest != child.patch_program.digest
+
+
+def test_module_insertion_revalidates_resources_before_materialization() -> None:
+    patcher = _site_patcher()
+    materializer = _Materializer([])
+    patcher.register_patch_materializer("test.module", materializer)
+    resource = torch.ones(1)
+    patcher.set_module_insertions("motion", (_insertion("motion", resources=resource),))
+    resource[0] = 2.0
+
+    with pytest.raises(
+        RuntimeError, match="module insertion resources for 'motion' changed"
+    ):
+        patcher.inject_model()
