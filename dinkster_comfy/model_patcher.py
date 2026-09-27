@@ -24,6 +24,7 @@ import logging
 import math
 import time
 import uuid
+from types import MappingProxyType
 from typing import Callable, Optional
 
 import torch
@@ -39,6 +40,7 @@ import dinkster_comfy.utils
 import comfy_aimdo.host_buffer
 from dinkster_comfy.comfy_types import UnetWrapperFunction
 from dinkster_comfy.internal_logging import detail
+from dinkster_comfy.patch_program import PatchProgram
 from dinkster_comfy.quant_ops import QuantizedTensor
 from dinkster_comfy.patcher_extension import CallbacksMP, PatcherInjection, WrappersMP
 
@@ -171,9 +173,10 @@ def string_to_seed(data):
 class LowVramPatch:
     is_lowvram_patch = True
 
-    def __init__(self, key, patches, convert_func=None, set_func=None):
+    def __init__(self, key, patches, validate, convert_func=None, set_func=None):
         self.key = key
         self.patches = patches
+        self.validate = validate
         self.convert_func = convert_func # TODO: remove
         self.set_func = set_func
         self.prepared_patches = None
@@ -185,6 +188,7 @@ class LowVramPatch:
         return counter[0]
 
     def prepare(self, destination, stream, copy=True, commit=True):
+        self.validate(self.key)
         counter = [0]
         prepared_patches = [
             (patch[0], dinkster_comfy.lora.prefetch_prepared_value(patch[1], counter, destination, stream, copy), patch[2], patch[3], patch[4])
@@ -198,6 +202,8 @@ class LowVramPatch:
         self.prepared_patches = None
 
     def __call__(self, weight):
+        if self.prepared_patches is None:
+            self.validate(self.key)
         patches = self.prepared_patches if self.prepared_patches is not None else self.patches[self.key]
         return dinkster_comfy.lora.calculate_weight(patches, weight, self.key, intermediate_dtype=weight.dtype)
 
@@ -348,7 +354,7 @@ class ModelPatcher:
         elif self.model.device is None:
             self.model.device = offload_device
 
-        self.patches = {}
+        self._set_patch_program(PatchProgram())
         self.backup = {}
         self.backup_buffers = {}
         self.object_patches = {}
@@ -444,9 +450,7 @@ class ModelPatcher:
             model_override = self.get_clone_model_override()
 
         n = class_(model_override[0], self.load_device, self.offload_device, self.model_size(), weight_inplace_update=self.weight_inplace_update, fast_disk=self.fast_disk)
-        n.patches = {}
-        for k in self.patches:
-            n.patches[k] = self.patches[k][:]
+        n._set_patch_program(self.patch_program)
         n.patches_uuid = self.patches_uuid
 
         n.object_patches = self.object_patches.copy()
@@ -840,10 +844,29 @@ class ModelPatcher:
         if hasattr(self.model, "get_dtype"):
             return self.model.get_dtype()
 
+    @property
+    def patches(self):
+        return self._compiled_patches
+
+    @patches.setter
+    def patches(self, patches):
+        program = PatchProgram.from_weight_patches(patches)
+        self._set_patch_program(program)
+        self.patches_uuid = program.digest
+
+    def _set_patch_program(self, program):
+        self.patch_program = program
+        patches = program.weight_patches()
+        self._compiled_patches = MappingProxyType({key: tuple(entries) for key, entries in patches.items()})
+
+    def _validate_patch_program(self, target=None):
+        self.patch_program.validate_resources(target)
+
     def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
         with self.use_ejected():
             p = set()
             model_sd = self.model.state_dict()
+            additions = []
             for k in patches:
                 offset = None
                 function = None
@@ -857,11 +880,11 @@ class ModelPatcher:
 
                 if key in model_sd:
                     p.add(k)
-                    current_patches = self.patches.get(key, [])
-                    current_patches.append((strength_patch, patches[k], strength_model, offset, function))
-                    self.patches[key] = current_patches
+                    additions.append((key, patches[k], strength_patch, strength_model, offset, function))
 
-            self.patches_uuid = uuid.uuid4()
+            program = self.patch_program.extend_weight_deltas(additions)
+            self._set_patch_program(program)
+            self.patches_uuid = program.digest
             return list(p)
 
     def get_key_patches(self, filter_prefix=None):
@@ -884,7 +907,7 @@ class ModelPatcher:
                 convert_func = lambda a, **kwargs: a
 
             if k in self.patches:
-                p[k] = [(weight, convert_func)] + self.patches[k]
+                p[k] = [(weight, convert_func)] + list(self.patches[k])
             else:
                 p[k] = [(weight, convert_func)]
         return p
@@ -900,6 +923,7 @@ class ModelPatcher:
             return sd
 
     def patch_weight_to_device(self, key, device_to=None, inplace_update=False, return_weight=False, force_cast=False):
+        self._validate_patch_program(key)
         weight, set_func, convert_func = get_key_weight(self.model, key)
         if key not in self.patches and not force_cast:
             return weight
@@ -983,6 +1007,7 @@ class ModelPatcher:
         return loading
 
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False):
+        self._validate_patch_program()
         with self.use_ejected():
             self.unpatch_hooks()
             mem_counter = 0
@@ -1027,14 +1052,14 @@ class ModelPatcher:
                             self.patch_weight_to_device(weight_key)
                         else:
                             _, set_func, convert_func = get_key_weight(self.model, weight_key)
-                            m.weight_function = [LowVramPatch(weight_key, self.patches, convert_func, set_func)]
+                            m.weight_function = [LowVramPatch(weight_key, self.patches, self.patch_program.validate_resources, convert_func, set_func)]
                             patch_counter += 1
                     if bias_key in self.patches:
                         if force_patch_weights or dinkster_comfy.lora.calculate_shape(self.patches[bias_key], m.bias, bias_key) != m.bias.shape:
                             self.patch_weight_to_device(bias_key)
                         else:
                             _, set_func, convert_func = get_key_weight(self.model, bias_key)
-                            m.bias_function = [LowVramPatch(bias_key, self.patches, convert_func, set_func)]
+                            m.bias_function = [LowVramPatch(bias_key, self.patches, self.patch_program.validate_resources, convert_func, set_func)]
                             patch_counter += 1
 
                     cast_weight = True
@@ -1224,14 +1249,14 @@ class ModelPatcher:
                                     self.patch_weight_to_device(weight_key)
                                 else:
                                     _, set_func, convert_func = get_key_weight(self.model, weight_key)
-                                    m.weight_function.append(LowVramPatch(weight_key, self.patches, convert_func, set_func))
+                                    m.weight_function.append(LowVramPatch(weight_key, self.patches, self.patch_program.validate_resources, convert_func, set_func))
                                     patch_counter += 1
                             if bias_key in self.patches:
                                 if force_patch_weights or dinkster_comfy.lora.calculate_shape(self.patches[bias_key], m.bias, bias_key) != m.bias.shape:
                                     self.patch_weight_to_device(bias_key)
                                 else:
                                     _, set_func, convert_func = get_key_weight(self.model, bias_key)
-                                    m.bias_function.append(LowVramPatch(bias_key, self.patches, convert_func, set_func))
+                                    m.bias_function.append(LowVramPatch(bias_key, self.patches, self.patch_program.validate_resources, convert_func, set_func))
                                     patch_counter += 1
                             cast_weight = True
 
@@ -1857,6 +1882,7 @@ class ModelPatcherDynamic(ModelPatcher):
 
 
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False, dirty=False):
+        self._validate_patch_program()
 
         #Force patching doesn't make sense in Dynamic loading, as you dont know what does and
         #doesn't need to be forced at this stage. The only thing you could do would be patch
@@ -1935,7 +1961,7 @@ class ModelPatcherDynamic(ModelPatcher):
                     if key in self.patches:
                         if dinkster_comfy.lora.calculate_shape(self.patches[key], weight, key) != weight.shape:
                             return (True, 0)
-                        lowvram_patch = LowVramPatch(key, self.patches)
+                        lowvram_patch = LowVramPatch(key, self.patches, self.patch_program.validate_resources)
                         lowvram_patch._pin_state = pin_state
                         setattr(m, param_key + "_lowvram_function", lowvram_patch)
                         num_patches += 1
