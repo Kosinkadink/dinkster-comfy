@@ -854,12 +854,9 @@ class ModelPatcher:
         self.patch_program = program
         patches = program.weight_patches()
         self._compiled_patches = MappingProxyType({key: tuple(entries) for key, entries in patches.items()})
-        self._patch_program_validated = False
 
-    def _validate_patch_program(self):
-        if not self._patch_program_validated:
-            self.patch_program.validate_resources()
-            self._patch_program_validated = True
+    def _validate_patch_program(self, target=None):
+        self.patch_program.validate_resources(target)
 
     def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
         with self.use_ejected():
@@ -922,7 +919,7 @@ class ModelPatcher:
             return sd
 
     def patch_weight_to_device(self, key, device_to=None, inplace_update=False, return_weight=False, force_cast=False):
-        self._validate_patch_program()
+        self._validate_patch_program(key)
         weight, set_func, convert_func = get_key_weight(self.model, key)
         if key not in self.patches and not force_cast:
             return weight

@@ -151,6 +151,19 @@ def test_model_patcher_refuses_a_mutated_bound_resource() -> None:
         patcher.patch_weight_to_device("weight", return_weight=True)
 
 
+def test_model_patcher_revalidates_before_each_materialization() -> None:
+    model = torch.nn.Linear(2, 2, bias=False)
+    patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+    delta = torch.ones_like(model.weight)
+    patcher.add_patches({"weight": ("diff", (delta,))})
+    patcher.patch_weight_to_device("weight", return_weight=True)
+
+    delta[0, 0] = 2.0
+
+    with pytest.raises(RuntimeError, match="patch resource for 'weight' changed"):
+        patcher.patch_weight_to_device("weight", return_weight=True)
+
+
 @pytest.mark.parametrize("strength", [float("inf"), float("-inf"), float("nan")])
 def test_non_finite_strength_is_refused(strength: float) -> None:
     with pytest.raises(ValueError, match="strength_patch must be finite"):

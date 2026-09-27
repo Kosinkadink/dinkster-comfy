@@ -218,9 +218,11 @@ class PatchProgram:
         ).encode("ascii")
         return hashlib.sha256(b"dinkster.patch-program.v1\0" + payload).hexdigest()
 
-    def validate_resources(self) -> None:
+    def validate_resources(self, target: str | None = None) -> None:
         tensor_digests: dict[int, str] = {}
         for entry in self.entries:
+            if target is not None and entry.target != target:
+                continue
             if entry.patch.identity != _digest(entry.patch.value, tensor_digests):
                 raise RuntimeError(
                     f"patch resource for '{entry.target}' changed after binding"
