@@ -55,22 +55,38 @@ except ImportError:
 COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE = comfy_kitchen.int8_attention_is_available()
 
 REGISTERED_ATTENTION_FUNCTIONS = {}
-def register_attention_function(name: str, func: Callable):
-    # avoid replacing existing functions
-    if name not in REGISTERED_ATTENTION_FUNCTIONS:
-        REGISTERED_ATTENTION_FUNCTIONS[name] = func
-    else:
-        logging.warning(f"Attention function {name} already registered, skipping registration.")
+_CORE_ATTENTION_FUNCTIONS = {}
 
-def get_attention_function(name: str, default: Any=...) -> Union[Callable, None]:
+
+def create_attention_function_registry() -> dict[str, Callable]:
+    return _CORE_ATTENTION_FUNCTIONS.copy()
+
+
+def register_attention_function(
+    name: str, func: Callable, *, registry: Optional[dict[str, Callable]] = None
+):
+    functions = REGISTERED_ATTENTION_FUNCTIONS if registry is None else registry
+    # avoid replacing existing functions
+    if name not in functions:
+        functions[name] = func
+    else:
+        logging.warning(
+            f"Attention function {name} already registered, skipping registration."
+        )
+
+
+def get_attention_function(
+    name: str, default: Any = ..., *, registry: Optional[dict[str, Callable]] = None
+) -> Union[Callable, None]:
     if name == "optimized":
         return optimized_attention
-    elif name not in REGISTERED_ATTENTION_FUNCTIONS:
+    functions = REGISTERED_ATTENTION_FUNCTIONS if registry is None else registry
+    if name not in functions:
         if default is ...:
             raise KeyError(f"Attention function {name} not found.")
         else:
             return default
-    return REGISTERED_ATTENTION_FUNCTIONS[name]
+    return functions[name]
 
 
 class ComfyAttention(nn.Module):
@@ -935,6 +951,7 @@ if model_management.xformers_enabled():
 register_attention_function("pytorch", attention_pytorch)
 register_attention_function("sub_quad", attention_sub_quad)
 register_attention_function("split", attention_split)
+_CORE_ATTENTION_FUNCTIONS = REGISTERED_ATTENTION_FUNCTIONS.copy()
 
 
 def optimized_attention_for_device(device, mask=False, small_input=False):
