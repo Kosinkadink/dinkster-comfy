@@ -47,6 +47,9 @@ repository = "https://github.com/Kosinkadink/dinkster-comfy"
 [tool.setuptools.packages.find]
 include = ["dinkster_comfy*"]
 
+[tool.setuptools.package-data]
+dinkster_comfy = ["**/*.json", "**/*.model", "**/*.txt"]
+
 [tool.ruff]
 lint.select = [
   "N805", # invalid-first-argument-name-for-method
