@@ -190,6 +190,7 @@ class BaseModel(torch.nn.Module):
                 logging.debug("using channels last mode for diffusion model")
             logging.info("model weight dtype {}, manual cast: {}".format(self.get_dtype(), self.manual_cast_dtype))
             dinkster_comfy.model_management.archive_model_dtypes(self.diffusion_model)
+            self.patch_site_map = self._module_patch_sites()
 
         self.model_type = model_type
         self.model_sampling = model_sampling(model_config, model_type)
@@ -205,6 +206,31 @@ class BaseModel(torch.nn.Module):
         self.memory_usage_factor = model_config.memory_usage_factor
         self.memory_usage_factor_conds = ()
         self.memory_usage_shape_process = {}
+
+    def _module_patch_sites(self):
+        sites = {"model.root": {"path": "diffusion_model", "order": 0}}
+        order = 1
+        block_groups = (
+            ("down", "input_blocks"),
+            ("mid", "middle_block"),
+            ("up", "output_blocks"),
+        )
+        for prefix, attribute in block_groups:
+            blocks = getattr(self.diffusion_model, attribute, None)
+            if blocks is None:
+                continue
+            if prefix == "mid":
+                blocks = (blocks,)
+            for index, _ in enumerate(blocks):
+                path = f"diffusion_model.{attribute}"
+                if prefix != "mid":
+                    path = f"{path}.{index}"
+                sites[f"{prefix}.{index}"] = {
+                    "path": path,
+                    "order": order,
+                }
+                order += 1
+        return sites
 
     def apply_model(self, x, t, c_concat=None, c_crossattn=None, control=None, transformer_options={}, **kwargs):
         return dinkster_comfy.patcher_extension.WrapperExecutor.new_class_executor(

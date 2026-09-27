@@ -355,9 +355,11 @@ class ModelPatcher:
             self.model.device = offload_device
 
         self._set_patch_program(PatchProgram())
-        self.patch_site_map = MappingProxyType(
-            dict(getattr(self.model, "patch_site_map", {}))
-        )
+        patch_site_map = {
+            "model.root": {"path": "", "order": 0},
+            **getattr(self.model, "patch_site_map", {}),
+        }
+        self.patch_site_map = MappingProxyType(patch_site_map)
         self.patch_materializers = {}
         self._materialized_insertions = []
         self._patch_scratch = {}

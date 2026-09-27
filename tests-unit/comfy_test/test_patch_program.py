@@ -6,6 +6,7 @@ from typing import Any, cast
 import pytest
 import torch
 
+from dinkster_comfy.model_base import BaseModel
 from dinkster_comfy.model_patcher import LowVramPatch, ModelPatcher
 from dinkster_comfy.patch_program import ModuleInsertionEntry, PatchProgram
 
@@ -252,6 +253,32 @@ def _site_patcher() -> ModelPatcher:
         "up.0": {"path": "up_blocks.0", "order": 2, "dimensions": (2, 2)},
     }
     return ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+
+
+def test_model_patcher_always_publishes_root_site() -> None:
+    model = torch.nn.Linear(2, 2, bias=False)
+
+    patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+
+    assert patcher.patch_site_map["model.root"] == {"path": "", "order": 0}
+
+
+def test_base_model_publishes_stable_unet_block_sites() -> None:
+    diffusion_model = torch.nn.Module()
+    diffusion_model.input_blocks = torch.nn.ModuleList(
+        (torch.nn.Identity(), torch.nn.Identity())
+    )
+    diffusion_model.middle_block = torch.nn.Identity()
+    diffusion_model.output_blocks = torch.nn.ModuleList((torch.nn.Identity(),))
+    model = type("Model", (), {"diffusion_model": diffusion_model})()
+
+    assert BaseModel._module_patch_sites(model) == {
+        "model.root": {"path": "diffusion_model", "order": 0},
+        "down.0": {"path": "diffusion_model.input_blocks.0", "order": 1},
+        "down.1": {"path": "diffusion_model.input_blocks.1", "order": 2},
+        "mid.0": {"path": "diffusion_model.middle_block", "order": 3},
+        "up.0": {"path": "diffusion_model.output_blocks.0", "order": 4},
+    }
 
 
 def test_module_insertion_identity_covers_structural_inputs() -> None:
