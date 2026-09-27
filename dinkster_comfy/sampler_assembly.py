@@ -104,17 +104,21 @@ class OptionSpec:
             raise ValueError(f"option name must be bare and nonempty, got {self.name!r}")
         self.check(self.default)
 
-    def check(self, value: OptionValue) -> None:
+    def check(self, value: object) -> OptionValue:
         if self.kind is OptionKind.FLOAT:
-            if type(value) is not float or not math.isfinite(value):
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise TypeError(f"option {self.name!r} must be a finite float")
-            if self.minimum is not None and value < self.minimum:
+            normalized = float(value)
+            if not math.isfinite(normalized):
+                raise ValueError(f"option {self.name!r} must be a finite float")
+            if self.minimum is not None and normalized < self.minimum:
                 raise ValueError(f"option {self.name!r} must be at least {self.minimum}")
-            if self.maximum is not None and value > self.maximum:
+            if self.maximum is not None and normalized > self.maximum:
                 raise ValueError(f"option {self.name!r} must be at most {self.maximum}")
-            return
+            return normalized
         if type(value) is not str or value not in self.choices:
             raise ValueError(f"option {self.name!r} must be one of {', '.join(self.choices)}")
+        return value
 
 
 @dataclass(frozen=True)
@@ -134,8 +138,7 @@ class SamplerDescriptor(Generic[TensorT]):
         values: dict[str, OptionValue] = {}
         for option in self.options:
             value = overrides.get(option.name, option.default)
-            option.check(value)  # type: ignore[arg-type]
-            values[option.name] = value  # type: ignore[assignment]
+            values[option.name] = option.check(value)
         return self.make(values)
 
 

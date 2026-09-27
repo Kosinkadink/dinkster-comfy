@@ -160,10 +160,13 @@ def test_sampler_descriptors_cover_receipt_backed_res4lyf_names() -> None:
 
 def test_sampler_options_refuse_unknown_or_out_of_range_values() -> None:
     descriptor = _descriptor("rk_beta")
+    descriptor.build(eta=0)
     with pytest.raises(ValueError, match="unknown sampler options"):
         descriptor.build(unknown=True)
     with pytest.raises(ValueError, match="at most 0.99"):
         descriptor.build(eta=1.0)
+    with pytest.raises(TypeError, match="finite float"):
+        descriptor.build(eta=True)
 
 
 def test_comfy_adapter_owns_seed_sigma_dtype_and_step_callbacks() -> None:
