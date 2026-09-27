@@ -297,3 +297,37 @@ class RealizedGainTable:
             * site_gain
             * lane_gain
         )
+
+    def tensor_gain(
+        self,
+        sigma: torch.Tensor | float,
+        output: torch.Tensor,
+        *,
+        site: str | None = None,
+        lanes=(),
+    ) -> float | torch.Tensor:
+        if self.lane_gains and lanes:
+            lane_names = tuple(
+                "positive" if lane == 0 else "negative" for lane in lanes
+            )
+            values = [
+                self.scalar_gain(sigma, site=site, lane=lane)
+                for lane in lane_names
+            ]
+            repeats = output.shape[0] // len(values)
+            gain = torch.tensor(
+                values, device=output.device, dtype=output.dtype
+            ).repeat_interleave(repeats)
+            gain = gain.reshape((output.shape[0],) + (1,) * (output.ndim - 1))
+        else:
+            gain = self.scalar_gain(sigma, site=site)
+        for mask in self.effect_masks:
+            mask = mask.to(device=output.device, dtype=output.dtype)
+            if output.ndim == 3 and mask.ndim >= 3:
+                mask = mask.flatten(1).unsqueeze(-1)
+            elif mask.ndim == output.ndim - 1:
+                mask = mask.unsqueeze(1)
+            if mask.shape[0] != output.shape[0]:
+                mask = mask.repeat_interleave(output.shape[0] // mask.shape[0], dim=0)
+            gain = gain * mask
+        return gain

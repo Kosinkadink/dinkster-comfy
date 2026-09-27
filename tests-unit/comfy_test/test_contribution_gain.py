@@ -229,6 +229,29 @@ def test_quantized_scheduled_adapter_uses_bypass_without_changing_base_weight(mo
     assert torch.equal(model(inputs), torch.zeros(1, 2))
 
 
+def test_guidance_row_gain_routes_float_adapter_through_bypass():
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2, bias=False))
+    model[0].weight.data.zero_()
+    patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+    hook = WeightHook()
+    hook.contribution_gain = ContributionGain(
+        lane_gains=(("positive", 2.0), ("negative", 0.5))
+    )
+    hook.realized_gain = hook.contribution_gain.realize(torch.tensor([1.0, 0.0]))
+    hook.current_timestep = 1.0
+    patcher.add_hook_patches(hook, {"0.weight": _BypassAdapter()})
+    active = HookGroup()
+    active.add(hook)
+    patcher.current_hooks = active
+    patcher.current_transformer_options = {"cond_or_uncond": [0, 1]}
+    patcher.inject_model()
+
+    output = model(torch.ones(2, 2))
+
+    assert torch.equal(output[0], torch.full((2,), 2.0))
+    assert torch.equal(output[1], torch.full((2,), 0.5))
+
+
 def test_program_identity_distinguishes_scheduled_bypass_gain_declarations(monkeypatch):
     monkeypatch.setattr(model_patcher_module, "QuantizedTensor", torch.Tensor)
     model = torch.nn.Sequential(torch.nn.Linear(2, 2, bias=False))
@@ -263,3 +286,18 @@ def test_attention_term_uses_realized_site_gain():
     inputs = (torch.zeros(1), torch.zeros(1), torch.zeros(1))
 
     assert patch(*inputs, {}) == tuple(torch.full((1,), 0.25) for _ in range(3))
+
+
+def test_tensor_gain_applies_guidance_rows_and_ordered_masks():
+    table = ContributionGain(
+        lane_gains=(("positive", 2.0), ("negative", 0.5)),
+        effect_masks=(torch.full((1, 1, 1), 0.5), torch.full((1, 1, 1), 0.25)),
+    ).realize(torch.tensor([1.0, 0.0]))
+    output = torch.ones(2, 1, 1, 1)
+
+    gain = table.tensor_gain(1.0, output, lanes=(0, 1))
+
+    assert torch.equal(
+        gain,
+        torch.tensor([0.25, 0.0625]).reshape(2, 1, 1, 1),
+    )

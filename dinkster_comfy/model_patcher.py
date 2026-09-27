@@ -449,6 +449,7 @@ class ModelPatcher:
         self.cached_hook_patches: dict[dinkster_comfy.hooks.HookGroup, dict[str, torch.Tensor]] = {}
         self.hook_weight_function_keys = set()
         self.current_hooks: Optional[dinkster_comfy.hooks.HookGroup] = None
+        self.current_transformer_options = None
         self.forced_hooks: Optional[dinkster_comfy.hooks.HookGroup] = None  # NOTE: only used for CLIP at this time
         self.is_clip = False
         self.hook_mode = dinkster_comfy.hooks.EnumHookMode.MaxSpeed
@@ -1782,8 +1783,15 @@ class ModelPatcher:
                 if key in model_sd:
                     p.add(k)
                     patch = patches[k]
+                    requires_output_gain = bool(
+                        hook.contribution_gain.lane_gains
+                        or hook.contribution_gain.effect_masks
+                    )
                     if (
-                        isinstance(model_sd[key], QuantizedTensor)
+                        (
+                            isinstance(model_sd[key], QuantizedTensor)
+                            or requires_output_gain
+                        )
                         and isinstance(patch, (WeightAdapterBase, WeightAdapterTrainBase))
                     ):
                         resource = ScheduledBypassAdapter.create(

@@ -161,15 +161,11 @@ class BypassForwardHook:
             where weights may not be in a usable format. All necessary shape
             information is provided via adapter attributes set during inject().
         """
-        self.adapter.multiplier = (
-            self.multiplier_provider()
-            if self.multiplier_provider is not None
-            else self.multiplier
-        )
+        self.adapter.multiplier = 1.0 if self.multiplier_provider is not None else self.multiplier
 
         # Check if adapter has custom bypass_forward (e.g., GLoRA)
         adapter_bypass = getattr(self.adapter, "bypass_forward", None)
-        if adapter_bypass is not None:
+        if adapter_bypass is not None and self.multiplier_provider is None:
             # Check if it's overridden (not the base class default)
             # Need to check both base classes since adapter could be either type
             adapter_type = type(self.adapter)
@@ -183,7 +179,10 @@ class BypassForwardHook:
         # Default bypass: g(f(x) + h(x, f(x)))
         base_out = self.original_forward(x, *args, **kwargs)
         h_out = self.adapter.h(x, base_out)
-        return self.adapter.g(base_out + h_out)
+        output = self.adapter.g(base_out + h_out)
+        if self.multiplier_provider is None:
+            return output
+        return base_out + (output - base_out) * self.multiplier_provider(output)
 
     def inject(self):
         """Replace module forward with bypass version."""
@@ -309,12 +308,16 @@ class ScheduledBypassMaterializer:
         module_key = resource.key.removesuffix(".weight")
         module = patcher.model.get_submodule(module_key)
 
-        def active_multiplier():
+        def active_multiplier(output):
             if patcher.current_hooks is None:
                 return 0.0
             for hook in patcher.current_hooks.hooks:
                 if hook.hook_ref is resource.hook_ref:
-                    return resource.strength * hook.gain_for(site=resource.key)
+                    return resource.strength * hook.tensor_gain_for(
+                        output,
+                        site=resource.key,
+                        transformer_options=patcher.current_transformer_options,
+                    )
             return 0.0
 
         return BypassForwardHook(

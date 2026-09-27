@@ -144,6 +144,17 @@ class Hook:
             lane=lane,
         )
 
+    def tensor_gain_for(self, output, *, site=None, transformer_options=None):
+        if self.realized_gain is None or self.current_timestep is None:
+            return self.current_gain
+        options = transformer_options or {}
+        return self.realized_gain.tensor_gain(
+            self.current_timestep,
+            output,
+            site=site,
+            lanes=options.get("cond_or_uncond", ()),
+        )
+
     def reset(self):
         self.realized_gain = None
         self.current_gain = 1.0
@@ -325,15 +336,26 @@ class _ContributionGainAttentionPatch:
 
     def __call__(self, *args, **kwargs):
         result = self.patch(*args, **kwargs)
-        gain = self.hook.gain_for(site=self.site)
+        options = args[-1] if args and isinstance(args[-1], dict) else {}
         if isinstance(result, tuple):
             return tuple(
-                original + (patched - original) * gain
+                original
+                + (patched - original)
+                * self.hook.tensor_gain_for(
+                    patched,
+                    site=self.site,
+                    transformer_options=options,
+                )
                 if isinstance(original, torch.Tensor) and isinstance(patched, torch.Tensor)
                 else patched
                 for original, patched in zip(args, result)
             )
         if isinstance(result, torch.Tensor) and args and isinstance(args[0], torch.Tensor):
+            gain = self.hook.tensor_gain_for(
+                result,
+                site=self.site,
+                transformer_options=options,
+            )
             return args[0] + (result - args[0]) * gain
         return result
 
