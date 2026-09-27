@@ -1284,14 +1284,14 @@ class LTXAV(BaseModel):
         return None
 
     def resize_cond_for_context_window(self, cond_key, cond_value, window, x_in, device, retain_index_list=[]):
-        # Audio denoise mask — slice using audio modality window
+        # Audio denoise mask - slice using audio modality window
         if cond_key == "audio_denoise_mask" and hasattr(window, 'modality_windows') and window.modality_windows:
             audio_window = window.modality_windows.get(1)
             if audio_window is not None and hasattr(cond_value, "cond") and isinstance(cond_value.cond, torch.Tensor):
                 sliced = audio_window.get_tensor(cond_value.cond, device, dim=2)
                 return cond_value._copy_with(sliced)
 
-        # Video denoise mask — split into video + guide portions, slice each
+        # Video denoise mask - split into video + guide portions, slice each
         if cond_key == "denoise_mask" and hasattr(cond_value, "cond") and isinstance(cond_value.cond, torch.Tensor):
             cond_tensor = cond_value.cond
             guide_count = cond_tensor.size(window.dim) - x_in.size(window.dim)
@@ -1308,7 +1308,7 @@ class LTXAV(BaseModel):
                 else:
                     return cond_value._copy_with(sliced_video)
 
-        # Keyframe indices — regenerate pixel coords for window, select guide positions
+        # Keyframe indices - regenerate pixel coords for window, select guide positions
         if cond_key == "keyframe_idxs":
             kf_local_pos = window.guide_kf_local_positions
             if not kf_local_pos:
@@ -1351,7 +1351,7 @@ class LTXAV(BaseModel):
                 pixel_coords = pixel_coords.expand(B, -1, -1, -1)
             return cond_value._copy_with(pixel_coords)
 
-        # Guide attention entries — adjust per-guide counts based on window overlap
+        # Guide attention entries - adjust per-guide counts based on window overlap
         if cond_key == "guide_attention_entries":
             overlap_info = window.guide_overlap_info
             H, W = x_in.shape[3], x_in.shape[4]
@@ -1557,6 +1557,17 @@ class Lumina2(BaseModel):
         ref_latents = kwargs.get("reference_latents", None)
         if ref_latents is not None:
             out['ref_latents'] = list([1, 16, sum(map(lambda a: math.prod(a.size()[2:]), ref_latents))])
+        return out
+
+class MingImage(Lumina2):
+    def extra_conds(self, **kwargs):
+        ref_latents = kwargs.pop("reference_latents", None)
+        out = super().extra_conds(**kwargs)
+        direct_context = kwargs.get("direct_context", None)
+        if direct_context is not None:
+            out['direct_context'] = dinkster_comfy.conds.CONDRegular(direct_context)
+        if ref_latents is not None:
+            out['ref_frames'] = dinkster_comfy.conds.CONDList([self.process_latent_in(lat)[:, :, f] for lat in ref_latents for f in range(lat.shape[2])])
         return out
 
 class ZImagePixelSpace(Lumina2):
