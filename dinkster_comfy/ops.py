@@ -20,7 +20,6 @@ import torch
 import logging
 import contextlib
 import inspect
-import threading
 import dinkster_comfy.model_management
 from dinkster_comfy.cli_args import args, PerformanceFeature
 import dinkster_comfy.float
@@ -63,32 +62,6 @@ def scaled_dot_product_attention(q, k, v, *args, **kwargs):
     return torch.nn.functional.scaled_dot_product_attention(q, k, v, *args, **kwargs)
 
 
-_sdpa_cuda_priority_initialized = False
-_sdpa_priority_lock = threading.Lock()
-
-def _initialize_cuda_sdpa_priority(q, k, v, attn_mask, dropout_p, is_causal, scale, enable_gqa):
-    global _sdpa_cuda_priority_initialized
-    if _sdpa_cuda_priority_initialized:
-        return
-    with _sdpa_priority_lock:
-        if _sdpa_cuda_priority_initialized:
-            return
-        torch._fused_sdp_choice(
-            q,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=dropout_p,
-            is_causal=is_causal,
-            scale=scale,
-            enable_gqa=enable_gqa,
-        )
-        priority = [int(backend) for backend in SDPA_BACKEND_PRIORITY]
-        priority.extend(backend for backend in torch._C._get_sdp_priority_order() if backend not in priority)
-        torch._C._set_sdp_priority_order(priority)
-        _sdpa_cuda_priority_initialized = True
-
-
 try:
     if torch.cuda.is_available():
         from torch.nn.attention import SDPBackend, sdpa_kernel
@@ -120,16 +93,6 @@ try:
                         if not supports_native_gqa:
                             k, v = repeat_kv_for_gqa(k, v, q.shape[-3], -3)
                             kwargs["enable_gqa"] = False
-                    _initialize_cuda_sdpa_priority(
-                        q,
-                        k,
-                        v,
-                        attn_mask,
-                        args[1] if len(args) > 1 else kwargs.get("dropout_p", 0.0),
-                        args[2] if len(args) > 2 else kwargs.get("is_causal", False),
-                        kwargs.get("scale"),
-                        kwargs.get("enable_gqa", False),
-                    )
                     return torch.nn.functional.scaled_dot_product_attention(q, k, v, *args, **kwargs)
         else:
             logging.warning("Torch version too old to set sdpa backend priority.")
