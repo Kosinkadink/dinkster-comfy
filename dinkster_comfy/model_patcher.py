@@ -354,6 +354,7 @@ class ModelPatcher:
         elif self.model.device is None:
             self.model.device = offload_device
 
+        self.model_options = {"transformer_options":{}}
         self._set_patch_program(PatchProgram())
         patch_site_map = {
             "model.root": {"path": "", "order": 0},
@@ -367,7 +368,6 @@ class ModelPatcher:
         self.backup_buffers = {}
         self.object_patches_backup = {}
         self.weight_wrapper_patches = {}
-        self.model_options = {"transformer_options":{}}
         self.load_device = load_device
         self.offload_device = offload_device
         self.weight_inplace_update = weight_inplace_update
@@ -672,10 +672,8 @@ class ModelPatcher:
         self.model_options["denoise_mask_function"] = denoise_mask_function
 
     def set_model_patch(self, patch, name):
-        to = self.model_options["transformer_options"]
-        if "patches" not in to:
-            to["patches"] = {}
-        to["patches"][name] = to["patches"].get(name, []) + [patch]
+        self._set_patch_program(self.patch_program.append_runtime_patch(name, patch))
+        self.patches_uuid = self.patch_program.digest
 
     def register_patch_materializer(self, recipe, materializer):
         if not recipe:
@@ -760,7 +758,14 @@ class ModelPatcher:
             raise error
 
     def set_model_patch_replace(self, patch, name, block_name, number, transformer_index=None):
-        self.model_options = set_model_options_patch_replace(self.model_options, patch, name, block_name, number, transformer_index=transformer_index)
+        if transformer_index is None:
+            key = (block_name, number)
+        else:
+            key = (block_name, number, transformer_index)
+        self._set_patch_program(
+            self.patch_program.replace_runtime_patch(name, key, patch)
+        )
+        self.patches_uuid = self.patch_program.digest
 
     def set_model_attn1_patch(self, patch):
         self.set_model_patch(patch, "attn1_patch")
@@ -865,43 +870,23 @@ class ModelPatcher:
                 return dinkster_comfy.utils.get_attr(self.model, name)
 
     def model_patches_to(self, device):
-        to = self.model_options["transformer_options"]
-        if "patches" in to:
-            patches = to["patches"]
-            for name in patches:
-                patch_list = patches[name]
-                for i in range(len(patch_list)):
-                    if hasattr(patch_list[i], "to"):
-                        patch_list[i] = patch_list[i].to(device)
-        if "patches_replace" in to:
-            patches = to["patches_replace"]
-            for name in patches:
-                patch_list = patches[name]
-                for k in patch_list:
-                    if hasattr(patch_list[k], "to"):
-                        patch_list[k] = patch_list[k].to(device)
+        def move(patch):
+            if hasattr(patch, "to"):
+                return patch.to(device)
+            return patch
+
+        self._set_patch_program(self.patch_program.map_runtime_patches(move))
+        self.patches_uuid = self.patch_program.digest
         if "model_function_wrapper" in self.model_options:
             wrap_func = self.model_options["model_function_wrapper"]
             if hasattr(wrap_func, "to"):
                 self.model_options["model_function_wrapper"] = wrap_func.to(device)
 
     def model_patches_models(self):
-        to = self.model_options["transformer_options"]
         models = []
-        if "patches" in to:
-            patches = to["patches"]
-            for name in patches:
-                patch_list = patches[name]
-                for i in range(len(patch_list)):
-                    if hasattr(patch_list[i], "models"):
-                        models += patch_list[i].models()
-        if "patches_replace" in to:
-            patches = to["patches_replace"]
-            for name in patches:
-                patch_list = patches[name]
-                for k in patch_list:
-                    if hasattr(patch_list[k], "models"):
-                        models += patch_list[k].models()
+        for entry in self.patch_program.runtime_patches():
+            if hasattr(entry.patch.value, "models"):
+                models += entry.patch.value.models()
         if "model_function_wrapper" in self.model_options:
             wrap_func = self.model_options["model_function_wrapper"]
             if hasattr(wrap_func, "models"):
@@ -910,21 +895,13 @@ class ModelPatcher:
         return models
 
     def model_patches_call_function(self, function_name="cleanup", arguments={}):
-        to = self.model_options["transformer_options"]
-        if "patches" in to:
-            patches = to["patches"]
-            for name in patches:
-                patch_list = patches[name]
-                for i in range(len(patch_list)):
-                    if hasattr(patch_list[i], function_name):
-                        getattr(patch_list[i], function_name)(**arguments)
-        if "patches_replace" in to:
-            patches = to["patches_replace"]
-            for name in patches:
-                patch_list = patches[name]
-                for k in patch_list:
-                    if hasattr(patch_list[k], function_name):
-                        getattr(patch_list[k], function_name)(**arguments)
+        def call(patch):
+            if hasattr(patch, function_name):
+                getattr(patch, function_name)(**arguments)
+            return patch
+
+        self._set_patch_program(self.patch_program.map_runtime_patches(call))
+        self.patches_uuid = self.patch_program.digest
         if "model_function_wrapper" in self.model_options:
             wrap_func = self.model_options["model_function_wrapper"]
             if hasattr(wrap_func, function_name):
@@ -949,6 +926,16 @@ class ModelPatcher:
         patches = program.weight_patches()
         self._compiled_patches = MappingProxyType({key: tuple(entries) for key, entries in patches.items()})
         self.object_patches = MappingProxyType(program.object_replacements())
+        transformer_options = self.model_options["transformer_options"]
+        transformer_options.pop("patches", None)
+        transformer_options.pop("patches_replace", None)
+        for entry in program.runtime_patches():
+            if entry.key is None:
+                runtime_patches = transformer_options.setdefault("patches", {})
+                runtime_patches.setdefault(entry.name, []).append(entry.patch.value)
+            else:
+                replacements = transformer_options.setdefault("patches_replace", {})
+                replacements.setdefault(entry.name, {})[entry.key] = entry.patch.value
 
     def _validate_patch_program(self, target=None):
         self.patch_program.validate_resources(target)

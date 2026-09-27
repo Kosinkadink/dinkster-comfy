@@ -318,7 +318,36 @@ class ObjectReplacementEntry:
             )
 
 
-PatchEntry = WeightDeltaEntry | ModuleInsertionEntry | ObjectReplacementEntry
+@dataclass(frozen=True)
+class RuntimePatchEntry:
+    name: str
+    key: tuple[object, ...] | None
+    patch: PatchResource
+
+    @classmethod
+    def create(
+        cls, *, name: str, patch: object, key: tuple[object, ...] | None = None
+    ) -> RuntimePatchEntry:
+        if not name:
+            raise ValueError("runtime patch name must not be empty")
+        return cls(name=name, key=key, patch=PatchResource.bind(patch))
+
+    def descriptor(self) -> dict[str, object]:
+        return {
+            "kind": "runtime_patch",
+            "name": self.name,
+            "key": _descriptor(self.key),
+            "patch": self.patch.identity,
+        }
+
+    def validate_resources(self) -> None:
+        if self.patch.identity != _digest(self.patch.value):
+            raise RuntimeError(f"runtime patch '{self.name}' changed after binding")
+
+
+PatchEntry = (
+    WeightDeltaEntry | ModuleInsertionEntry | ObjectReplacementEntry | RuntimePatchEntry
+)
 
 
 @dataclass(frozen=True)
@@ -339,7 +368,9 @@ class PatchProgram:
     def validate_resources(self, target: str | None = None) -> None:
         tensor_digests: dict[int, str] = {}
         for entry in self.entries:
-            if isinstance(entry, (ModuleInsertionEntry, ObjectReplacementEntry)):
+            if isinstance(
+                entry, (ModuleInsertionEntry, ObjectReplacementEntry, RuntimePatchEntry)
+            ):
                 if target is None:
                     entry.validate_resources()
                 continue
@@ -459,6 +490,42 @@ class PatchProgram:
             for entry in self.entries
             if isinstance(entry, ObjectReplacementEntry)
         }
+
+    def append_runtime_patch(self, name: str, patch: object) -> PatchProgram:
+        return PatchProgram(
+            (*self.entries, RuntimePatchEntry.create(name=name, patch=patch))
+        )
+
+    def replace_runtime_patch(
+        self, name: str, key: tuple[object, ...], patch: object
+    ) -> PatchProgram:
+        entry = RuntimePatchEntry.create(name=name, key=key, patch=patch)
+        retained = tuple(
+            current
+            for current in self.entries
+            if not (
+                isinstance(current, RuntimePatchEntry)
+                and current.name == name
+                and current.key == key
+            )
+        )
+        return PatchProgram((*retained, entry))
+
+    def runtime_patches(self) -> tuple[RuntimePatchEntry, ...]:
+        return tuple(
+            entry for entry in self.entries if isinstance(entry, RuntimePatchEntry)
+        )
+
+    def map_runtime_patches(self, function) -> PatchProgram:
+        entries = tuple(
+            dataclasses.replace(
+                entry, patch=PatchResource.bind(function(entry.patch.value))
+            )
+            if isinstance(entry, RuntimePatchEntry)
+            else entry
+            for entry in self.entries
+        )
+        return PatchProgram(entries)
 
     def replace_weight_deltas(self, patches: Mapping[str, list[tuple]]) -> PatchProgram:
         weights = PatchProgram.from_weight_patches(patches).entries

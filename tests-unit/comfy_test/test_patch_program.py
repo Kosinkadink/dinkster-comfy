@@ -245,6 +245,30 @@ class _Materializer:
         self.events.append(f"teardown:{namespace}")
 
 
+class _RuntimePatch:
+    def __init__(self, value: torch.Tensor, events: list[str]):
+        self.value = value
+        self.events = events
+
+    def to(self, device_or_dtype):
+        self.value = self.value.to(device_or_dtype)
+        return self
+
+    def models(self):
+        return ["auxiliary-model"]
+
+    def cleanup(self):
+        self.events.append("cleanup")
+
+
+def _identity(value):
+    return value
+
+
+def _increment(value):
+    return value + 1
+
+
 def _site_patcher() -> ModelPatcher:
     model = torch.nn.Linear(2, 2, bias=False)
     model.patch_site_map = {
@@ -431,3 +455,46 @@ def test_object_patch_resource_mutation_is_refused() -> None:
         RuntimeError, match="object replacement for 'model_sampling' changed"
     ):
         patcher._validate_patch_program()
+
+
+def test_runtime_patches_compile_existing_model_options_shape() -> None:
+    patcher = _site_patcher()
+
+    patcher.set_model_patch(_identity, "input_block_patch")
+    patcher.set_model_patch_replace(_increment, "attn1", "input", 2, 3)
+
+    transformer_options = patcher.model_options["transformer_options"]
+    assert transformer_options["patches"] == {"input_block_patch": [_identity]}
+    assert transformer_options["patches_replace"] == {
+        "attn1": {("input", 2, 3): _increment}
+    }
+
+
+def test_replacing_runtime_patch_derives_without_changing_parent() -> None:
+    parent = _site_patcher()
+    parent.set_model_patch_replace(_identity, "attn1", "input", 2)
+    child = parent.clone()
+
+    child.set_model_patch_replace(_increment, "attn1", "input", 2)
+
+    parent_options = parent.model_options["transformer_options"]["patches_replace"]
+    child_options = child.model_options["transformer_options"]["patches_replace"]
+    assert parent_options["attn1"][("input", 2)] is _identity
+    assert child_options["attn1"][("input", 2)] is _increment
+    assert parent.patch_program.digest != child.patch_program.digest
+
+
+def test_runtime_patch_lifecycle_uses_program_resources() -> None:
+    events: list[str] = []
+    patcher = _site_patcher()
+    runtime_patch = _RuntimePatch(torch.ones(1), events)
+    patcher.set_model_patch(runtime_patch, "post_input")
+
+    patcher.model_patches_to(torch.float16)
+    assert patcher.model_patches_models() == ["auxiliary-model"]
+    patcher.model_patches_call_function()
+
+    compiled = patcher.model_options["transformer_options"]["patches"]
+    assert compiled["post_input"][0].value.dtype == torch.float16
+    assert events == ["cleanup"]
+    patcher._validate_patch_program()
