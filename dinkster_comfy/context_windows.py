@@ -10,6 +10,8 @@ import dinkster_comfy.model_management
 import dinkster_comfy.patcher_extension
 import dinkster_comfy.utils
 import dinkster_comfy.conds
+import dinkster_comfy.window_plan
+import dinkster_comfy.window_execution
 if TYPE_CHECKING:
     from dinkster_comfy.model_base import BaseModel
     from dinkster_comfy.model_patcher import ModelPatcher
@@ -336,6 +338,96 @@ class ContextSchedule:
 class ContextFuseMethod:
     name: str
     func: Callable
+
+
+@dataclass
+class TemporalWindowPlan:
+    """Compile a stock temporal schedule as one media-axis plan layer."""
+
+    context_schedule: ContextSchedule
+    fuse_method: ContextFuseMethod
+    context_length: int = 1
+    context_overlap: int = 0
+    context_stride: int = 1
+    closed_loop: bool = False
+    _step: int = 0
+
+    def layer(self, extent: int, model_options: dict[str]) -> dinkster_comfy.window_plan.WindowPlanLayer:
+        windows = self.context_schedule.func(extent, self, model_options)
+        modular = self.context_schedule.name == ContextSchedules.UNIFORM_LOOPED
+        weights = {
+            ContextFuseMethods.FLAT: dinkster_comfy.window_plan.WindowWeightKind.FLAT,
+            ContextFuseMethods.PYRAMID: dinkster_comfy.window_plan.WindowWeightKind.PYRAMID,
+            ContextFuseMethods.OVERLAP_LINEAR: dinkster_comfy.window_plan.WindowWeightKind.OVERLAP_LINEAR,
+        }
+        try:
+            weight = weights[self.fuse_method.name]
+        except KeyError:
+            raise ValueError(
+                f"fuse method {self.fuse_method.name!r} has no layered window-plan merge"
+            ) from None
+        overlap = self.context_overlap if weight is dinkster_comfy.window_plan.WindowWeightKind.OVERLAP_LINEAR else 0
+        return dinkster_comfy.window_plan.WindowPlanLayer(
+            ("temporal",),
+            tuple(
+                dinkster_comfy.window_plan.LayerWindow(
+                    (dinkster_comfy.window_plan.WindowIndexList(tuple(window), modular),)
+                )
+                for window in windows
+            ),
+            (dinkster_comfy.window_plan.WindowWeightProfile(weight, overlap),),
+            dinkster_comfy.window_plan.MergeDeclaration(),
+        )
+
+    def executor(
+        self,
+        *,
+        extent: int,
+        latent_dimension: int,
+        model_options: dict[str],
+        layers: tuple[dinkster_comfy.window_plan.WindowPlanLayer, ...] = (),
+        axes: tuple[dinkster_comfy.window_plan.MediaAxis, ...] = (),
+        kinds: tuple[dinkster_comfy.window_plan.WindowKind, ...] = (),
+        latent_axis_dimensions: tuple[tuple[str, int], ...] = (),
+    ) -> dinkster_comfy.window_execution.WindowPlanExecutor:
+        temporal_axis = dinkster_comfy.window_plan.MediaAxis(
+            "temporal",
+            extent,
+            wrappable=self.context_schedule.name == ContextSchedules.UNIFORM_LOOPED,
+        )
+        declared_axes = tuple(
+            sorted(
+                (temporal_axis,) + tuple(axis for axis in axes if axis.name != "temporal"),
+                key=lambda axis: axis.name,
+            )
+        )
+        if not kinds:
+            kinds = (
+                dinkster_comfy.window_plan.WindowKind(
+                    "latent",
+                    (
+                        dinkster_comfy.window_plan.KindAxisMap(
+                            "temporal",
+                            extent,
+                            dinkster_comfy.window_plan.IntegerAffineIndexMap(1),
+                        ),
+                    ),
+                ),
+            )
+        plan = dinkster_comfy.window_plan.compile_window_plan(
+            axes=declared_axes,
+            kinds=kinds,
+            layers=(self.layer(extent, model_options),) + layers,
+        )
+        latent_axes = (("temporal", latent_dimension),) + tuple(
+            item for item in latent_axis_dimensions if item[0] != "temporal"
+        )
+        return dinkster_comfy.window_execution.WindowPlanExecutor(
+            plan,
+            dinkster_comfy.window_execution.WindowTensorLayout(
+                "latent", tuple(sorted(latent_axes))
+            ),
+        )
 
 ContextResults = collections.namedtuple("ContextResults", ['window_idx', 'sub_conds_out', 'sub_conds', 'window'])
 class IndexListContextHandler(ContextHandlerABC):
