@@ -221,6 +221,19 @@ def test_layer_arrival_order_is_non_semantic_and_digest_order_is_canonical() -> 
     assert tuple(axis.name for axis in first.axes) == ("height", "temporal", "width")
 
 
+def test_composite_occurrences_follow_canonical_layer_local_position_order() -> None:
+    height = _layer(("height",), (_window((1, 0)),))
+    width = _layer(("width",), (_window((1, 0)),))
+    plan = compile_window_plan(
+        axes=(MediaAxis("height", 2), MediaAxis("width", 2)),
+        layers=(height, width),
+    )
+
+    assert tuple(
+        occurrence.local_positions for occurrence in plan.joint_windows[0].occurrences
+    ) == ((0, 0), (0, 1), (1, 0), (1, 1))
+
+
 def test_disjoint_layers_form_flat_cartesian_joint_windows() -> None:
     temporal = _layer(
         ("temporal",),
@@ -602,9 +615,9 @@ def test_digest_domains_bind_layer_vector_and_distinguish_layerings() -> None:
     ]
     assert stacked.digest == hashlib.sha256(stacked.canonical_preimage.encode()).hexdigest()
     assert stacked.joint_windows[0].axis_indices == flat.joint_windows[0].axis_indices
-    assert tuple(
+    assert sorted(
         occurrence.coordinate for occurrence in stacked.joint_windows[0].occurrences
-    ) == tuple(occurrence.coordinate for occurrence in flat.joint_windows[0].occurrences)
+    ) == sorted(occurrence.coordinate for occurrence in flat.joint_windows[0].occurrences)
     assert stacked.digest != flat.digest
 
 

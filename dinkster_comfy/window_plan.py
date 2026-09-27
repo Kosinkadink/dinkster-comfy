@@ -800,10 +800,6 @@ def compile_window_plan(
                     weight,
                 )
             )
-        if len(compiled_layers) > 1:
-            occurrences.sort(
-                key=lambda occurrence: (occurrence.coordinate, occurrence.local_positions)
-            )
         joint_windows.append(
             JointWindow(
                 joint_index,
