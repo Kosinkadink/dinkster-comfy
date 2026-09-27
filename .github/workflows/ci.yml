@@ -22,6 +22,11 @@ jobs:
           python -m pip install dist/*.whl
           python -m pip install -r tests-unit/requirements.txt
       - name: Verify standalone imports
-        run: python -c "import dinkster_comfy.sd, dinkster_comfy.samplers, dinkster_comfy.model_management"
+        run: |
+          if ! python -c "import dinkster_comfy.sd, dinkster_comfy.samplers, dinkster_comfy.model_management" 2>import-error.log; then
+            message=$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' import-error.log)
+            echo "::error title=Standalone import failed::$message"
+            exit 1
+          fi
       - name: Run retained library tests
         run: python -m pytest -q tests-unit/comfy_test tests-unit/comfy_quant tests-unit/deploy_environment_test.py
