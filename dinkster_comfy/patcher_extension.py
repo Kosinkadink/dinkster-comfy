@@ -130,9 +130,17 @@ class WrapperExecutor:
         return cls(original, class_obj, wrappers, idx=idx)
 
 class PatcherInjection:
-    def __init__(self, inject: Callable, eject: Callable):
+    def __init__(self, inject: Callable, eject: Callable, resources=None):
         self.inject = inject
         self.eject = eject
+        self.resources = resources
+
+    def patch_program_descriptor(self):
+        return {
+            "inject": self.inject,
+            "eject": self.eject,
+            "resources": self.resources,
+        }
 
 def copy_nested_dicts(input_dict: dict):
     new_dict = input_dict.copy()

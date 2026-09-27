@@ -392,7 +392,17 @@ class BypassInjectionManager:
             for hook in self.hooks:
                 hook.eject()
 
-        return [PatcherInjection(inject=inject_all, eject=eject_all)]
+        resources = tuple(
+            (key, adapter, strength)
+            for key, (adapter, strength) in sorted(self.adapters.items())
+        )
+        return [
+            PatcherInjection(
+                inject=inject_all,
+                eject=eject_all,
+                resources=resources,
+            )
+        ]
 
     def get_hook_count(self) -> int:
         """Return number of hooks that will be/are injected."""
