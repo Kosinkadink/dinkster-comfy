@@ -1,5 +1,16 @@
 import torch
 
+from dinkster_comfy.cli_args import args
+
+args.cpu = True
+
+from dinkster_comfy.context_windows import (
+    ContextFuseMethods,
+    ContextSchedules,
+    TemporalWindowPlan,
+    get_matching_context_schedule,
+    get_matching_fuse_method,
+)
 from dinkster_comfy.window_execution import (
     CompiledWindowField,
     WindowPlanExecutor,
@@ -142,3 +153,22 @@ def test_executor_stacks_spatial_and_temporal_layers_and_gathers_masks_per_windo
 
     assert sorted(seen_masks) == [0.0, 0.25, 0.5, 1.0]
     assert torch.equal(result[0], x + mask.tensor)
+
+
+def test_temporal_adapter_compiles_stock_context_schedule_without_raw_dimension_claims():
+    temporal = TemporalWindowPlan(
+        get_matching_context_schedule(ContextSchedules.UNIFORM_LOOPED),
+        get_matching_fuse_method(ContextFuseMethods.PYRAMID),
+        context_length=4,
+        context_overlap=1,
+        context_stride=2,
+        closed_loop=True,
+        _step=3,
+    )
+    expected = temporal.context_schedule.func(6, temporal, {})
+
+    executor = temporal.executor(extent=6, latent_dimension=2, model_options={})
+
+    actual = [dict(window.axis_indices)["temporal"] for window in executor.plan.joint_windows]
+    assert actual == [tuple(window) for window in expected]
+    assert executor.latent_layout == WindowTensorLayout("latent", (("temporal", 2),))
