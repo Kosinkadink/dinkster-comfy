@@ -9,6 +9,7 @@ Upstream fork point: `comfyanonymous/ComfyUI` commit
 | `dinkster_comfy/hooks.py` | changed by us | Owns `conditioning_set_values` instead of importing the deleted application helper |
 | `dinkster_comfy/window_plan.py` | ours only | Compiles layered media-axis window declarations into canonical joint windows with deterministic weighted merge semantics |
 | `dinkster_comfy/window_execution.py`, `dinkster_comfy/samplers.py` window-plan dispatch | changed by us | Evaluates compiled joint windows through declared tensor kinds, gathers full-domain fields per window, and merges once with per-occurrence accumulation |
+| `dinkster_comfy/window_execution.py` invariant kinds | changed by us | Keeps media axes absent from a tensor kind unsliced and merges their repeated joint-window contributions without assigning raw tensor dimensions |
 | `dinkster_comfy/context_windows.py` temporal adapter | changed by us | Compiles stock temporal context schedules into the same layered media-axis plan used by spatial windows |
 | `dinkster_comfy/ldm/modules/attention.py` | changed by us | Supports caller-owned attention function registries for isolated worker processes while preserving the upstream default registry |
 | `dinkster_comfy/patch_program.py`, `dinkster_comfy/model_patcher.py` | changed by us | Represents ordered weight changes as immutable, content-identified patch programs while preserving the existing model patcher calls |
