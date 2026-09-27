@@ -7,6 +7,7 @@ Upstream fork point: `comfyanonymous/ComfyUI` commit
 | --- | --- | --- |
 | `dinkster_comfy/` except entries below | kept upstream | ComfyUI inference implementation, mechanically renamed from `comfy` and rewritten to import `dinkster_comfy` |
 | `dinkster_comfy/hooks.py` | changed by us | Owns `conditioning_set_values` instead of importing the deleted application helper |
+| `dinkster_comfy/ops.py` | changed by us | Initializes Torch's CUDA SDPA chooser on the first real invocation, then restores the declared backend priority to keep cold and warm execution identical |
 | `dinkster_comfy/ldm/sam3d_body/face_landmarker.py` | changed by us | Relocates the upstream face landmarker required by the retained SAM 3D Body model from deleted `comfy_extras` |
 | `dinkster_comfy/ldm/sam3d_body/model/model.py` | changed by us | Imports the relocated face landmarker from the library |
 | `tests-unit/comfy_test/`, `tests-unit/comfy_quant/`, `tests-unit/deploy_environment_test.py` | changed by us | Retains pure-library tests and rewrites their package imports |
