@@ -7,20 +7,20 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from comfy.cli_args import args
+from dinkster_comfy.cli_args import args
 
 if not torch.cuda.is_available():
     args.cpu = True
 
-import comfy.ldm.seedvr.model as seedvr_model  # noqa: E402
-import comfy.ldm.seedvr.vae as vae_mod  # noqa: E402
-import comfy.ldm.modules.attention as attention  # noqa: E402
-import comfy.ops as comfy_ops  # noqa: E402
-from comfy.ldm.seedvr.vae import (  # noqa: E402
+import dinkster_comfy.ldm.seedvr.model as seedvr_model  # noqa: E402
+import dinkster_comfy.ldm.seedvr.vae as vae_mod  # noqa: E402
+import dinkster_comfy.ldm.modules.attention as attention  # noqa: E402
+import dinkster_comfy.ops as comfy_ops  # noqa: E402
+from dinkster_comfy.ldm.seedvr.vae import (  # noqa: E402
     causal_norm_wrapper,
     set_norm_limit,
 )
-from comfy.ldm.seedvr.attention import var_attention_optimized_split  # noqa: E402
+from dinkster_comfy.ldm.seedvr.attention import var_attention_optimized_split  # noqa: E402
 
 
 _NUM_CHANNELS = 8

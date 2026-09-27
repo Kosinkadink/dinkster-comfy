@@ -5,15 +5,15 @@ import pytest
 import torch
 import torch.nn as nn
 
-from comfy.cli_args import args as cli_args
+from dinkster_comfy.cli_args import args as cli_args
 
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
-import comfy.ldm.seedvr.vae as vae_mod  # noqa: E402
-import comfy.ldm.seedvr.vae as seedvr_vae_mod  # noqa: E402
-import comfy.sd as sd_mod  # noqa: E402
-from comfy.ldm.seedvr.vae import MemoryState, tiled_vae  # noqa: E402
+import dinkster_comfy.ldm.seedvr.vae as vae_mod  # noqa: E402
+import dinkster_comfy.ldm.seedvr.vae as seedvr_vae_mod  # noqa: E402
+import dinkster_comfy.sd as sd_mod  # noqa: E402
+from dinkster_comfy.ldm.seedvr.vae import MemoryState, tiled_vae  # noqa: E402
 
 
 _LATENT_CHANNELS = seedvr_vae_mod.SEEDVR2_LATENT_CHANNELS

@@ -4,13 +4,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-from comfy.cli_args import args as cli_args
+from dinkster_comfy.cli_args import args as cli_args
 
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
-import comfy.ldm.seedvr.vae as vae_mod  # noqa: E402
-from comfy_extras import nodes_seedvr  # noqa: E402
+import dinkster_comfy.ldm.seedvr.vae as vae_mod  # noqa: E402
 
 
 _LATENT_CHANNELS = vae_mod.SEEDVR2_LATENT_CHANNELS
@@ -56,6 +55,7 @@ class _Wrapper(vae_mod.VideoAutoencoderKLWrapper):
     def parameters(self):
         return iter([torch.nn.Parameter(torch.zeros(()))])
 
+
 def _decode_stub(self, latent):
     self.calls.append(tuple(latent.shape))
     return torch.zeros(latent.shape[0], 3, latent.shape[2], latent.shape[3] * 8, latent.shape[4] * 8)
@@ -76,19 +76,3 @@ def test_seedvr2_wrapper_decode_rejects_wrong_rank_latents():
 
     with pytest.raises(RuntimeError, match=r"latent input must be 4-D collapsed .* or 5-D"):
         wrapper.decode(torch.zeros(1, _LATENT_CHANNELS, 4))
-
-
-def _t_padded(t_in: int) -> int:
-    if t_in == 1:
-        return 1
-    if t_in <= 4:
-        return 5
-    if (t_in - 1) % 4 == 0:
-        return t_in
-    return t_in + (4 - ((t_in - 1) % 4))
-
-
-@pytest.mark.parametrize("t_in", [1, 5, 9])
-def test_t_padded_matches_cut_videos(t_in):
-    dummy = torch.zeros(1, t_in, 1, 1, 1)
-    assert nodes_seedvr.cut_videos(dummy).shape[1] == _t_padded(t_in)

@@ -2,31 +2,26 @@ from types import SimpleNamespace
 
 import torch
 
-from comfy.cli_args import args
+from dinkster_comfy.cli_args import args
 
 args.cpu = True
 
-from comfy import model_base, model_detection
-import comfy.latent_formats
-import comfy.sample
-import nodes
-from comfy.ldm.sensenova import model as sensenova_model
-from comfy.ldm.sensenova.conditioning import (
+from dinkster_comfy import model_base, model_detection
+from dinkster_comfy.ldm.sensenova import model as sensenova_model
+from dinkster_comfy.ldm.sensenova.conditioning import (
     block_causal_mask,
     condition_input_ids,
     conditioned_input_length,
     preprocess_references,
     thw_indexes,
 )
-from comfy.ldm.sensenova.model import _match_prefix_batch, _pad_to_merged_patch_size
-from comfy.ldm.sensenova.sampling import (
+from dinkster_comfy.ldm.sensenova.model import _match_prefix_batch, _pad_to_merged_patch_size
+from dinkster_comfy.ldm.sensenova.sampling import (
     SenseNovaModelSampling,
     resolution_noise_scale,
     upstream_sigmas,
 )
-from comfy.text_encoders.sensenova import SenseNovaTokenizer
-from comfy_extras.nodes_hidream_o1 import HiDreamO1ReferenceImages
-from comfy_extras.nodes_sensenova import SenseNovaSamplingOptions
+from dinkster_comfy.text_encoders.sensenova import SenseNovaTokenizer
 
 
 def _minimal_state_dict():
@@ -129,112 +124,6 @@ def test_sensenova_sampling_matches_upstream_schedule_and_resolution_scale():
     assert torch.allclose(scaled, torch.full_like(noise, 0.5))
 
 
-def test_shared_reference_images_append_when_chained():
-    conditioning = [[torch.empty(1), {}]]
-    first_image = torch.empty(1, 8, 8, 3)
-    second_image = torch.empty(1, 8, 8, 3)
-
-    first = HiDreamO1ReferenceImages.execute(
-        positive=conditioning,
-        negative=conditioning,
-        images={"image_1": first_image},
-    )
-    second = HiDreamO1ReferenceImages.execute(
-        positive=first[0],
-        negative=first[1],
-        images={"image_1": second_image},
-    )
-
-    references = second[0][0][1]["reference_latents"]
-    assert len(references) == 2
-    assert references[0] is first_image
-    assert references[1] is second_image
-    assert second[1][0][1]["reference_latents"] == references
-    assert second[1][0][1]["prompt_type"] == "negative"
-
-
-def test_shared_reference_images_use_numeric_socket_order():
-    conditioning = [[torch.empty(1), {}]]
-    first_image = torch.empty(1, 8, 8, 3)
-    second_image = torch.empty(1, 8, 8, 3)
-    extra_image = torch.empty(1, 8, 8, 3)
-
-    output = HiDreamO1ReferenceImages.execute(
-        positive=conditioning,
-        negative=conditioning,
-        images={
-            "image_2": second_image,
-            "extra_image": extra_image,
-            "image_1": first_image,
-        },
-    )
-
-    references = output[0][0][1]["reference_latents"]
-    assert references[0] is first_image
-    assert references[1] is second_image
-    assert references[2] is extra_image
-
-
-def test_shared_reference_images_allow_empty_inputs_and_image_batches():
-    conditioning = [[torch.empty(1), {}]]
-    empty = HiDreamO1ReferenceImages.execute(
-        positive=conditioning,
-        negative=conditioning,
-        images={},
-    )
-    assert empty[0] is conditioning
-    assert empty[1] is conditioning
-
-    image_batch = torch.empty(2, 8, 8, 3)
-    attached = HiDreamO1ReferenceImages.execute(
-        positive=conditioning,
-        negative=conditioning,
-        images={"image_1": image_batch},
-    )
-    assert attached[0][0][1]["reference_latents"] == [image_batch]
-
-
-def test_hidream_o1_ignores_shared_negative_marker(monkeypatch):
-    calls = []
-
-    def build_extra_conds(text_input_ids, noise, ref_images, target_patch_size):
-        calls.append((text_input_ids, noise, ref_images, target_patch_size))
-        return {
-            "input_ids": text_input_ids,
-            "ar_len": text_input_ids.shape[1] - 1,
-        }
-
-    monkeypatch.setattr(model_base, "build_extra_conds", build_extra_conds)
-    model = object.__new__(model_base.HiDreamO1)
-    torch.nn.Module.__init__(model)
-    model.concat_keys = ()
-    input_ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
-    noise = torch.empty(1, 3, 64, 64)
-    references = [torch.empty(1, 32, 32, 3)]
-
-    positive = model.extra_conds(
-        text_input_ids=input_ids,
-        noise=noise,
-        reference_latents=references,
-    )
-    negative = model.extra_conds(
-        text_input_ids=input_ids,
-        noise=noise,
-        reference_latents=references,
-        prompt_type="negative",
-    )
-
-    assert len(calls) == 2
-    for call_input_ids, call_noise, call_references, call_patch_size in calls:
-        assert call_input_ids is input_ids
-        assert call_noise is noise
-        assert call_references is references
-        assert call_patch_size == 32
-    assert positive.keys() == negative.keys()
-    assert torch.equal(positive["input_ids"].cond, negative["input_ids"].cond)
-    assert positive["ar_len"].cond == negative["ar_len"].cond
-
-
 def test_sensenova_reference_preprocessing_preserves_size_and_splits_batches():
     references = preprocess_references(
         [torch.rand(2, 9, 13, 1), torch.empty(1, 0, 0, 0)]
@@ -284,21 +173,6 @@ def test_sensenova_reference_shape_estimate_uses_padded_image_sizes():
     ]
 
 
-def test_standard_empty_latent_adapts_to_sensenova_pixel_format():
-    latent = nodes.EmptyLatentImage().generate(width=64, height=96, batch_size=2)[0]
-    model = SimpleNamespace(
-        get_model_object=lambda name: comfy.latent_formats.HiDreamO1Pixel()
-    )
-
-    samples = comfy.sample.fix_empty_latent_channels(
-        model,
-        latent["samples"],
-        latent["downscale_ratio_spacial"],
-    )
-
-    assert samples.shape == (2, 3, 96, 64)
-
-
 def test_sensenova_prefix_conditioning_adapts_to_mismatched_batches():
     input_ids = torch.tensor([[1], [2]])
     indexes = torch.arange(6).reshape(2, 3, 1)
@@ -309,22 +183,6 @@ def test_sensenova_prefix_conditioning_adapts_to_mismatched_batches():
     assert input_ids[:, 0].tolist() == [1, 2, 2]
     assert indexes.shape == (3, 3, 1)
     assert mask.shape == (3, 1, 1, 1)
-
-
-def test_reference_node_and_sensenova_sampling_do_not_add_quality_limits():
-    sampling_inputs = {
-        input.id: input for input in SenseNovaSamplingOptions.define_schema().inputs
-    }
-    assert sampling_inputs["shift"].min is None
-    assert sampling_inputs["shift"].max is None
-
-    reference_inputs = {
-        input.id: input for input in HiDreamO1ReferenceImages.define_schema().inputs
-    }
-    images = reference_inputs["images"]
-    assert images.optional
-    assert images.template.min == 0
-    assert len(images.template.names) == 100
 
 
 def test_sensenova_prefix_preprocessing_runs_each_prefix_layer_once(monkeypatch):

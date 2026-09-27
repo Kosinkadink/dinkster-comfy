@@ -1,14 +1,54 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
-name = "ComfyUI"
-version = "0.37.0"
+name = "dinkster-comfy"
+version = "0.1.0"
+description = "Dinkster-owned inference library forked from ComfyUI"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
+dependencies = [
+  "torch>=2.5",
+  "torchsde",
+  "torchvision",
+  "numpy>=1.25.0",
+  "einops",
+  "transformers>=4.50.3",
+  "tokenizers>=0.13.3",
+  "sentencepiece",
+  "safetensors>=0.4.2",
+  "aiohttp>=3.11.8",
+  "yarl>=1.18.0",
+  "PyYAML",
+  "Pillow",
+  "scipy",
+  "tqdm",
+  "psutil",
+  "filelock",
+  "av>=17.0.0",
+  "comfy-kitchen==0.2.35",
+  "comfy-aimdo==0.5.5",
+  "requests",
+  "simpleeval>=1.0.0",
+  "blake3",
+  "kornia>=0.7.1",
+  "spandrel",
+  "pydantic~=2.0",
+  "pydantic-settings~=2.0",
+  "PyOpenGL>=3.1.8",
+  "comfy-angle",
+]
 
 [project.urls]
-homepage = "https://www.comfy.org/"
-repository = "https://github.com/comfyanonymous/ComfyUI"
-documentation = "https://docs.comfy.org/"
+repository = "https://github.com/Kosinkadink/dinkster-comfy"
+
+[tool.setuptools.packages.find]
+include = ["dinkster_comfy*"]
+
+[tool.setuptools.package-data]
+dinkster_comfy = ["**/*.json", "**/*.model", "**/*.txt"]
 
 [tool.ruff]
 lint.select = [

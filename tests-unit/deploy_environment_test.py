@@ -1,11 +1,11 @@
-"""Tests for comfy.deploy_environment."""
+"""Tests for dinkster_comfy.deploy_environment."""
 
 import os
 
 import pytest
 
-from comfy import deploy_environment
-from comfy.deploy_environment import get_deploy_environment
+from dinkster_comfy import deploy_environment
+from dinkster_comfy.deploy_environment import get_deploy_environment
 
 
 @pytest.fixture(autouse=True)
