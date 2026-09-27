@@ -30,7 +30,9 @@ from dinkster_comfy.window_plan import (
     WindowWeightProfile,
     compile_window_plan,
     IntegerAffineIndexMap,
+    ProportionalRangeIndexMap,
 )
+from dinkster_comfy.nested_tensor import NestedTensor
 
 
 def _layer(axis, windows):
@@ -172,3 +174,41 @@ def test_temporal_adapter_compiles_stock_context_schedule_without_raw_dimension_
     actual = [dict(window.axis_indices)["temporal"] for window in executor.plan.joint_windows]
     assert actual == [tuple(window) for window in expected]
     assert executor.latent_layout == WindowTensorLayout("latent", (("temporal", 2),))
+
+
+def test_executor_maps_asymmetric_nested_video_and_audio_streams():
+    temporal = MediaAxis("temporal", 3)
+    layer = _layer("temporal", ((0, 1), (1, 2)))
+    kinds = (
+        WindowKind(
+            "audio",
+            (KindAxisMap("temporal", 5, ProportionalRangeIndexMap()),),
+        ),
+        _kind("video", (temporal,)),
+    )
+    plan = compile_window_plan(axes=(temporal,), kinds=kinds, layers=(layer,))
+    executor = WindowPlanExecutor(
+        plan,
+        (
+            WindowTensorLayout("video", (("temporal", 2),)),
+            WindowTensorLayout("audio", (("temporal", 3),)),
+        ),
+    )
+    video = torch.tensor([[[1.0, 2.0, 3.0]]])
+    audio = torch.tensor([[[[10.0, 20.0, 30.0, 40.0, 50.0]]]])
+    latent = NestedTensor((video, audio))
+    seen_shapes = []
+
+    def evaluate(model, conds, sub_x, timestep, options):
+        del model, conds, timestep, options
+        seen_shapes.append(tuple(tuple(stream.shape) for stream in sub_x.unbind()))
+        return [sub_x + 100.0 * len(seen_shapes)]
+
+    result = executor.execute(evaluate, object(), [[]], latent, torch.tensor([1.0]), {})[0]
+
+    assert seen_shapes == [((1, 1, 2), (1, 1, 1, 3)), ((1, 1, 2), (1, 1, 1, 3))]
+    assert torch.equal(result.unbind()[0], torch.tensor([[[101.0, 152.0, 203.0]]]))
+    assert torch.equal(
+        result.unbind()[1],
+        torch.tensor([[[[110.0, 120.0, 180.0, 240.0, 250.0]]]]),
+    )

@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
 
 import torch
 
-from .window_plan import AccumulationDType, CompositeWindowPlan, JointWindow
+from .nested_tensor import NestedTensor
+from .window_plan import (
+    AccumulationDType,
+    CompositeWindowPlan,
+    JointWindow,
+    ProportionalRangeIndexMap,
+    map_window_indices,
+)
 
 __all__ = [
     "CompiledWindowField",
@@ -85,8 +93,8 @@ def gather_window_tensor(
 ) -> torch.Tensor:
     """Gather one tensor through its declared per-kind media-axis maps."""
 
-    if type(tensor) is not torch.Tensor:
-        raise TypeError("window input must be an exact torch.Tensor")
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError("window input must be a torch.Tensor")
     if type(layout) is not WindowTensorLayout:
         raise TypeError("layout must be an exact WindowTensorLayout")
     if type(window) is not JointWindow:
@@ -112,6 +120,39 @@ def _axis_positions(plan: CompositeWindowPlan, layout: WindowTensorLayout) -> di
         raise ValueError("output layout must map every semantic plan axis")
     occurrence_axes = tuple(axis for layer in plan.layers for axis in layer.axes)
     return {axis: occurrence_axes.index(axis) for axis in layout_axes}
+
+
+def _kind_local_positions(
+    plan: CompositeWindowPlan,
+    window: JointWindow,
+    layout: WindowTensorLayout,
+) -> dict[str, tuple[tuple[int, int], ...]]:
+    kind = next(kind for kind in plan.kinds if kind.name == layout.kind)
+    mappings = {mapping.axis: mapping for mapping in kind.axis_maps}
+    primary_indices = dict(window.axis_indices)
+    kind_indices = _kind_indices(window, layout.kind)
+    axis_extents = {axis.name: axis.extent for axis in plan.axes}
+    result = {}
+    for axis, _ in layout.axis_dimensions:
+        mapping = mappings[axis]
+        entries = []
+        seen = set()
+        for primary_position, primary_index in enumerate(primary_indices[axis]):
+            mapped = map_window_indices(
+                mapping.profile,
+                (primary_index,),
+                primary_extent=axis_extents[axis],
+                kind_extent=mapping.extent,
+            )
+            for coordinate in mapped:
+                if type(mapping.profile) is ProportionalRangeIndexMap and coordinate in seen:
+                    continue
+                seen.add(coordinate)
+                entries.append((coordinate, primary_position))
+        if tuple(coordinate for coordinate, _ in entries) != kind_indices[axis]:
+            raise ValueError("compiled kind indices cannot be traced to primary occurrences")
+        result[axis] = tuple(entries)
+    return result
 
 
 def merge_window_tensors(
@@ -140,7 +181,6 @@ def merge_window_tensors(
     accumulator = torch.zeros(output_shape, dtype=accumulation_dtype, device=first.device)
     denominator = torch.zeros(output_shape, dtype=accumulation_dtype, device=first.device)
     occurrence_positions = _axis_positions(plan, layout)
-    semantic_axes = tuple(axis.name for axis in plan.axes)
     dimension_by_axis = dict(layout.axis_dimensions)
 
     for window, output in zip(plan.joint_windows, outputs, strict=True):
@@ -155,12 +195,25 @@ def merge_window_tensors(
             or output.device != first.device
         ):
             raise ValueError(f"joint window {window.index} returned an incompatible tensor")
-        for occurrence in window.occurrences:
+        local_entries = _kind_local_positions(plan, window, layout)
+        occurrence_by_positions = {
+            occurrence.local_positions: occurrence for occurrence in window.occurrences
+        }
+        occurrence_axes = tuple(axis for layer in plan.layers for axis in layer.axes)
+        for local_positions in itertools.product(
+            *(range(len(local_entries[axis])) for axis in dimension_by_axis)
+        ):
             source = [slice(None)] * len(output_shape)
             target = [slice(None)] * len(output_shape)
-            for axis, dimension in dimension_by_axis.items():
-                source[dimension] = occurrence.local_positions[occurrence_positions[axis]]
-                target[dimension] = occurrence.coordinate[semantic_axes.index(axis)]
+            primary_positions = [0] * len(occurrence_axes)
+            for (axis, dimension), local_position in zip(
+                dimension_by_axis.items(), local_positions, strict=True
+            ):
+                coordinate, primary_position = local_entries[axis][local_position]
+                source[dimension] = local_position
+                target[dimension] = coordinate
+                primary_positions[occurrence_positions[axis]] = primary_position
+            occurrence = occurrence_by_positions[tuple(primary_positions)]
             source_index = tuple(source)
             target_index = tuple(target)
             weight = occurrence.weight
@@ -174,18 +227,65 @@ class WindowPlanExecutor:
     """Run one conditioning evaluation over every joint window and merge once."""
 
     plan: CompositeWindowPlan
-    latent_layout: WindowTensorLayout
+    latent_layout: WindowTensorLayout | tuple[WindowTensorLayout, ...]
 
     def __post_init__(self) -> None:
         if type(self.plan) is not CompositeWindowPlan:
             raise TypeError("plan must be an exact CompositeWindowPlan")
-        if type(self.latent_layout) is not WindowTensorLayout:
-            raise TypeError("latent_layout must be an exact WindowTensorLayout")
+        layouts = self.layouts
+        if not layouts or any(type(layout) is not WindowTensorLayout for layout in layouts):
+            raise TypeError("latent_layout must contain WindowTensorLayout values")
+
+    @property
+    def layouts(self) -> tuple[WindowTensorLayout, ...]:
+        if type(self.latent_layout) is WindowTensorLayout:
+            return (self.latent_layout,)
+        if type(self.latent_layout) is tuple:
+            return self.latent_layout
+        return ()
+
+    def _gather_latent(self, value, window: JointWindow):
+        if type(value) is NestedTensor:
+            tensors = value.unbind()
+            if len(tensors) != len(self.layouts):
+                raise ValueError("nested latent stream count does not match its declarations")
+            return NestedTensor(
+                tuple(
+                    gather_window_tensor(tensor, layout, window)
+                    for tensor, layout in zip(tensors, self.layouts, strict=True)
+                )
+            )
+        if len(self.layouts) != 1:
+            raise ValueError("ordinary latent tensors require exactly one declaration")
+        return gather_window_tensor(value, self.layouts[0], window)
+
+    def _merge_latent(self, outputs, template):
+        if type(template) is NestedTensor:
+            streams = tuple(output.unbind() for output in outputs)
+            if any(len(output) != len(self.layouts) for output in streams):
+                raise ValueError("window output stream count does not match its declarations")
+            return NestedTensor(
+                tuple(
+                    merge_window_tensors(
+                        self.plan,
+                        layout,
+                        tuple(output[index] for output in streams),
+                        tuple(template.unbind()[index].shape),
+                    )
+                    for index, layout in enumerate(self.layouts)
+                )
+            )
+        return merge_window_tensors(
+            self.plan,
+            self.layouts[0],
+            tuple(outputs),
+            tuple(template.shape),
+        )
 
     def execute(self, evaluate, model, conds, x_in, timestep, model_options):
         outputs = [[] for _ in conds]
         for window in self.plan.joint_windows:
-            sub_x = gather_window_tensor(x_in, self.latent_layout, window)
+            sub_x = self._gather_latent(x_in, window)
             sub_conds = gather_window_value(conds, window)
             sub_options = model_options.copy()
             transformer_options = model_options.get("transformer_options", {}).copy()
@@ -197,12 +297,4 @@ class WindowPlanExecutor:
                 raise ValueError("window evaluation returned the wrong conditioning count")
             for index, output in enumerate(sub_outputs):
                 outputs[index].append(output)
-        return [
-            merge_window_tensors(
-                self.plan,
-                self.latent_layout,
-                tuple(window_outputs),
-                tuple(x_in.shape),
-            )
-            for window_outputs in outputs
-        ]
+        return [self._merge_latent(window_outputs, x_in) for window_outputs in outputs]
