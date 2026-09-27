@@ -949,7 +949,7 @@ class ModelPatcher:
                 key = entry.namespace.removeprefix("additional:")
                 additional_models.setdefault(key, []).append(entry.resources.value)
         self.additional_models = MappingProxyType(
-            {key: tuple(models) for key, models in additional_models.items()}
+            {key: list(models) for key, models in additional_models.items()}
         )
         transformer_options = self.model_options["transformer_options"]
         transformer_options.pop("patches", None)

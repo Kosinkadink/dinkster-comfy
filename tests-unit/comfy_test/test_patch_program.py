@@ -472,6 +472,7 @@ def test_additional_models_use_clone_scoped_program_resources() -> None:
     auxiliary = _site_patcher()
     parent.set_additional_models("control", [auxiliary])
 
+    assert isinstance(parent.additional_models["control"], list)
     child = parent.clone()
 
     assert parent.get_additional_models_with_key("control") == [auxiliary]
