@@ -854,6 +854,12 @@ class ModelPatcher:
         self.patch_program = program
         patches = program.weight_patches()
         self._compiled_patches = MappingProxyType({key: tuple(entries) for key, entries in patches.items()})
+        self._patch_program_validated = False
+
+    def _validate_patch_program(self):
+        if not self._patch_program_validated:
+            self.patch_program.validate_resources()
+            self._patch_program_validated = True
 
     def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
         with self.use_ejected():
@@ -916,6 +922,7 @@ class ModelPatcher:
             return sd
 
     def patch_weight_to_device(self, key, device_to=None, inplace_update=False, return_weight=False, force_cast=False):
+        self._validate_patch_program()
         weight, set_func, convert_func = get_key_weight(self.model, key)
         if key not in self.patches and not force_cast:
             return weight
@@ -999,6 +1006,7 @@ class ModelPatcher:
         return loading
 
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False):
+        self._validate_patch_program()
         with self.use_ejected():
             self.unpatch_hooks()
             mem_counter = 0
@@ -1873,6 +1881,7 @@ class ModelPatcherDynamic(ModelPatcher):
 
 
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False, dirty=False):
+        self._validate_patch_program()
 
         #Force patching doesn't make sense in Dynamic loading, as you dont know what does and
         #doesn't need to be forced at this stage. The only thing you could do would be patch

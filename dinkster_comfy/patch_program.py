@@ -177,7 +177,9 @@ class WeightDeltaEntry:
             else strengths["strength_model"],
             offset=offset,
             function=function,
-            function_identity=None if function is None else _digest(function),
+            function_identity=None
+            if function is None
+            else _digest(function, tensor_digests),
         )
 
     def descriptor(self) -> dict[str, object]:
@@ -215,6 +217,20 @@ class PatchProgram:
             sort_keys=True,
         ).encode("ascii")
         return hashlib.sha256(b"dinkster.patch-program.v1\0" + payload).hexdigest()
+
+    def validate_resources(self) -> None:
+        tensor_digests: dict[int, str] = {}
+        for entry in self.entries:
+            if entry.patch.identity != _digest(entry.patch.value, tensor_digests):
+                raise RuntimeError(
+                    f"patch resource for '{entry.target}' changed after binding"
+                )
+            if entry.function is not None and entry.function_identity != _digest(
+                entry.function, tensor_digests
+            ):
+                raise RuntimeError(
+                    f"patch function for '{entry.target}' changed after binding"
+                )
 
     def append_weight_delta(
         self,
