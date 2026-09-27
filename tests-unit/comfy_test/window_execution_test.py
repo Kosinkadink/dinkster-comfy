@@ -2,6 +2,7 @@ import torch
 
 from dinkster_comfy.window_execution import (
     CompiledWindowField,
+    WindowPlanExecutor,
     WindowTensorLayout,
     gather_window_tensor,
     merge_window_tensors,
@@ -99,3 +100,45 @@ def test_repeated_occurrences_accumulate_outputs_and_full_domain_mask_gathers_on
     merged = merge_window_tensors(plan, latent_layout, (first, second), (1, 1, 3))
 
     assert torch.equal(merged, torch.tensor([[[14.0 / 3.0, 10.0, 12.0]]]))
+
+
+def test_executor_stacks_spatial_and_temporal_layers_and_gathers_masks_per_window():
+    temporal = MediaAxis("temporal", 2)
+    height = MediaAxis("height", 2)
+    kinds = (
+        _kind("effect_mask", (temporal, height)),
+        _kind("latent", (temporal, height)),
+    )
+    plan = compile_window_plan(
+        axes=(temporal, height),
+        kinds=kinds,
+        layers=(
+            _layer("temporal", ((0,), (1,))),
+            _layer("height", ((0,), (1,))),
+        ),
+    )
+    layout = WindowTensorLayout("latent", (("height", 2), ("temporal", 3)))
+    mask = CompiledWindowField(
+        torch.tensor([[[[1.0, 0.5], [0.25, 0.0]]]]),
+        WindowTensorLayout("effect_mask", (("height", 2), ("temporal", 3))),
+    )
+    x = torch.arange(4.0).reshape(1, 1, 2, 2)
+    seen_masks = []
+
+    def evaluate(model, conds, sub_x, timestep, options):
+        del model, timestep
+        seen_masks.append(conds[0][0]["mask"].item())
+        assert options["transformer_options"]["window"] in plan.joint_windows
+        return [sub_x + conds[0][0]["mask"]]
+
+    result = WindowPlanExecutor(plan, layout).execute(
+        evaluate,
+        object(),
+        [[{"mask": mask}]],
+        x,
+        torch.tensor([1.0]),
+        {"unrelated": "preserved"},
+    )
+
+    assert sorted(seen_masks) == [0.0, 0.25, 0.5, 1.0]
+    assert torch.equal(result[0], x + mask.tensor)

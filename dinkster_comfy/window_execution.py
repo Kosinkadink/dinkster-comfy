@@ -10,7 +10,9 @@ from .window_plan import AccumulationDType, CompositeWindowPlan, JointWindow
 
 __all__ = [
     "CompiledWindowField",
+    "WindowPlanExecutor",
     "WindowTensorLayout",
+    "gather_window_value",
     "gather_window_tensor",
     "merge_window_tensors",
 ]
@@ -53,6 +55,20 @@ class CompiledWindowField:
 
     def gather(self, window: JointWindow) -> torch.Tensor:
         return gather_window_tensor(self.tensor, self.layout, window)
+
+
+def gather_window_value(value, window: JointWindow):
+    """Gather declared fields while preserving ordinary conditioning values."""
+
+    if type(value) is CompiledWindowField:
+        return value.gather(window)
+    if type(value) is dict:
+        return {key: gather_window_value(item, window) for key, item in value.items()}
+    if type(value) is list:
+        return [gather_window_value(item, window) for item in value]
+    if type(value) is tuple:
+        return tuple(gather_window_value(item, window) for item in value)
+    return value
 
 
 def _kind_indices(window: JointWindow, kind: str) -> dict[str, tuple[int, ...]]:
@@ -123,7 +139,8 @@ def merge_window_tensors(
     }[plan.merge.accumulation_dtype]
     accumulator = torch.zeros(output_shape, dtype=accumulation_dtype, device=first.device)
     denominator = torch.zeros(output_shape, dtype=accumulation_dtype, device=first.device)
-    axis_positions = _axis_positions(plan, layout)
+    occurrence_positions = _axis_positions(plan, layout)
+    semantic_axes = tuple(axis.name for axis in plan.axes)
     dimension_by_axis = dict(layout.axis_dimensions)
 
     for window, output in zip(plan.joint_windows, outputs, strict=True):
@@ -142,12 +159,50 @@ def merge_window_tensors(
             source = [slice(None)] * len(output_shape)
             target = [slice(None)] * len(output_shape)
             for axis, dimension in dimension_by_axis.items():
-                plan_position = axis_positions[axis]
-                source[dimension] = occurrence.local_positions[plan_position]
-                target[dimension] = occurrence.coordinate[plan_position]
+                source[dimension] = occurrence.local_positions[occurrence_positions[axis]]
+                target[dimension] = occurrence.coordinate[semantic_axes.index(axis)]
             source_index = tuple(source)
             target_index = tuple(target)
             weight = occurrence.weight
             accumulator[target_index].add_(output[source_index].to(accumulation_dtype) * weight)
             denominator[target_index].add_(weight)
     return (accumulator / denominator).to(first.dtype)
+
+
+@dataclass(frozen=True, slots=True)
+class WindowPlanExecutor:
+    """Run one conditioning evaluation over every joint window and merge once."""
+
+    plan: CompositeWindowPlan
+    latent_layout: WindowTensorLayout
+
+    def __post_init__(self) -> None:
+        if type(self.plan) is not CompositeWindowPlan:
+            raise TypeError("plan must be an exact CompositeWindowPlan")
+        if type(self.latent_layout) is not WindowTensorLayout:
+            raise TypeError("latent_layout must be an exact WindowTensorLayout")
+
+    def execute(self, evaluate, model, conds, x_in, timestep, model_options):
+        outputs = [[] for _ in conds]
+        for window in self.plan.joint_windows:
+            sub_x = gather_window_tensor(x_in, self.latent_layout, window)
+            sub_conds = gather_window_value(conds, window)
+            sub_options = model_options.copy()
+            transformer_options = model_options.get("transformer_options", {}).copy()
+            transformer_options["window_plan"] = self.plan
+            transformer_options["window"] = window
+            sub_options["transformer_options"] = transformer_options
+            sub_outputs = evaluate(model, sub_conds, sub_x, timestep, sub_options)
+            if len(sub_outputs) != len(outputs):
+                raise ValueError("window evaluation returned the wrong conditioning count")
+            for index, output in enumerate(sub_outputs):
+                outputs[index].append(output)
+        return [
+            merge_window_tensors(
+                self.plan,
+                self.latent_layout,
+                tuple(window_outputs),
+                tuple(x_in.shape),
+            )
+            for window_outputs in outputs
+        ]
