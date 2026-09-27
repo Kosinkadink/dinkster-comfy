@@ -2251,7 +2251,7 @@ class ModelPatcherDynamic(ModelPatcher):
                     dinkster_comfy.model_management.discard_cuda_async_error()
                     continue
                 module_pin["registered"] = False
-                dinkster_comfy.model_management.TOTAL_PINNED_MEMORY = max(0, dinkster_comfy.model_management.TOTAL_PINNED_MEMORY - size)
+                dinkster_comfy.model_management.get_model_manager().release_pinned_memory(size)
                 pinned_size[0] = max(0, pinned_size[0] - size)
                 freed += size
                 ram_to_unload -= size
@@ -2276,7 +2276,7 @@ class ModelPatcherDynamic(ModelPatcher):
                 hostbuf.truncate(offset, do_unregister=registered)
                 stack_split[0] = min(stack_split[0], len(stack) - 1)
                 if registered:
-                    dinkster_comfy.model_management.TOTAL_PINNED_MEMORY = max(0, dinkster_comfy.model_management.TOTAL_PINNED_MEMORY - size)
+                    dinkster_comfy.model_management.get_model_manager().release_pinned_memory(size)
                     pinned_size[0] = max(0, pinned_size[0] - size)
                 freed += size
                 ram_to_unload -= size

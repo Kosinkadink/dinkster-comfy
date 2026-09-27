@@ -135,6 +135,7 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
     def ensure_offload_stream(module, required_size, check_largest):
         nonlocal offload_stream
         nonlocal cast_buffer
+        manager = dinkster_comfy.model_management.get_model_manager()
 
         if offload_stream is None:
             offload_stream = dinkster_comfy.model_management.get_offload_stream(device)
@@ -142,11 +143,11 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
             return
 
         current_size = 0 if cast_buffer is None else cast_buffer.size()
-        if current_size < required_size and module is dinkster_comfy.model_management.LARGEST_AIMDO_CASTED_WEIGHT[0]:
+        if current_size < required_size and module is manager.largest_aimdo_casted_weight[0]:
             offload_stream = dinkster_comfy.model_management.get_offload_stream(device)
             cast_buffer = None
-        if required_size > dinkster_comfy.model_management.LARGEST_AIMDO_CASTED_WEIGHT[1]:
-            dinkster_comfy.model_management.LARGEST_AIMDO_CASTED_WEIGHT = (module, required_size)
+        if required_size > manager.largest_aimdo_casted_weight[1]:
+            manager.largest_aimdo_casted_weight = (module, required_size)
 
     def get_cast_buffer(buffer_size):
         nonlocal offload_stream

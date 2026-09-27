@@ -632,8 +632,6 @@ try:
 except:
     pass
 
-DIRTY_MMAPS = set()
-
 PIN_PRESSURE_HYSTERESIS = 256 * 1024 * 1024
 
 #Freeing registerables on pressure does imply a GPU sync, so go big on
@@ -653,7 +651,7 @@ def module_size(module):
 def mark_mmap_dirty(storage):
     mmap_refs = getattr(storage, "_comfy_tensor_mmap_refs", None)
     if mmap_refs is not None:
-        DIRTY_MMAPS.add(mmap_refs[0])
+        get_model_manager().dirty_mmaps.add(mmap_refs[0])
 
 PIN_SUBSETS = [ "weights", "patches" ]
 LOADED_PIN_SUBSETS = [ "weights-loaded", "patches-loaded" ]
@@ -781,7 +779,7 @@ def free_registrations(shortfall, evict_active=True):
 
 
 def _free_registrations(manager, shortfall, evict_active=True):
-    if MAX_PINNED_MEMORY <= 0:
+    if manager.max_pinned_memory <= 0:
         return False
     if shortfall <= 0:
         return True
@@ -803,7 +801,7 @@ def ensure_pin_registerable(size, evict_active=True):
 
 def _ensure_pin_registerable(manager, size, evict_active=True):
     return manager.free_registrations(
-        TOTAL_PINNED_MEMORY + size - MAX_PINNED_MEMORY,
+        manager.total_pinned_memory + size - manager.max_pinned_memory,
         evict_active=evict_active,
     )
 
@@ -901,6 +899,20 @@ class LoadedModel:
 class ModelManager:
     def __init__(self):
         self._loaded_models: list[LoadedModel] = []
+        self.dirty_mmaps = set()
+        self.streams = {}
+        self.stream_counters = {}
+        self.stream_cast_buffers = {}
+        self.largest_casted_weight = (None, 0)
+        self.stream_aimdo_cast_buffers = {}
+        self.largest_aimdo_casted_weight = (None, 0)
+        self.cross_step_state = weakref.WeakSet()
+        self.pinned_memory = {}
+        self.total_pinned_memory = 0
+        self.max_pinned_memory = -1
+        self.lora_compute_dtypes = {}
+        self.interrupt_processing_mutex = threading.RLock()
+        self.interrupt_processing = False
 
     def loaded_model_records(self):
         return tuple(self._loaded_models)
@@ -926,6 +938,12 @@ class ModelManager:
 
     def ensure_pin_registerable(self, size, evict_active=True):
         return _ensure_pin_registerable(self, size, evict_active)
+
+    def add_pinned_memory(self, size):
+        self.total_pinned_memory += size
+
+    def release_pinned_memory(self, size):
+        self.total_pinned_memory = max(0, self.total_pinned_memory - size)
 
     def free_memory(
         self,
@@ -997,6 +1015,7 @@ def set_model_manager(manager):
         raise TypeError("model manager must be a ModelManager")
     if _model_manager.loaded_model_records():
         raise RuntimeError("cannot replace the model manager while models are loaded")
+    manager.max_pinned_memory = _model_manager.max_pinned_memory
     _model_manager = manager
 
 
@@ -1544,7 +1563,6 @@ def force_channels_last():
     return False
 
 
-STREAMS = {}
 NUM_STREAMS = 0
 if args.async_offload is not None:
     NUM_STREAMS = args.async_offload
@@ -1571,22 +1589,14 @@ def current_stream(device):
     else:
         return None
 
-stream_counters = {}
-
-STREAM_CAST_BUFFERS = {}
-LARGEST_CASTED_WEIGHT = (None, 0)
-STREAM_AIMDO_CAST_BUFFERS = {}
-LARGEST_AIMDO_CASTED_WEIGHT = (None, 0)
-CROSS_STEP_STATE = weakref.WeakSet()
-
 DEFAULT_AIMDO_CAST_BUFFER_RESERVATION_SIZE = 16 * 1024 ** 3
 
 # NOTE: devs/agents: this is temporary and will be removed in a future dinkster_comfy. Not supported for custom node use.
 def _register_cross_step(module):
-    CROSS_STEP_STATE.add(module)
+    get_model_manager().cross_step_state.add(module)
 
 def get_cast_buffer(offload_stream, device, size, ref):
-    global LARGEST_CASTED_WEIGHT
+    manager = get_model_manager()
 
     if offload_stream is not None:
         wf_context = offload_stream
@@ -1595,9 +1605,9 @@ def get_cast_buffer(offload_stream, device, size, ref):
     else:
         wf_context = nullcontext()
 
-    cast_buffer = STREAM_CAST_BUFFERS.get(offload_stream, None)
+    cast_buffer = manager.stream_cast_buffers.get(offload_stream, None)
     if cast_buffer is None or cast_buffer.numel() < size:
-        if ref is LARGEST_CASTED_WEIGHT[0]:
+        if ref is manager.largest_casted_weight[0]:
             #If there is one giant weight we do not want both streams to
             #allocate a buffer for it. It's up to the caster to get the other
             #offload stream in this corner case
@@ -1605,45 +1615,44 @@ def get_cast_buffer(offload_stream, device, size, ref):
         if cast_buffer is not None and cast_buffer.numel() > 50 * (1024 ** 2):
             #I want my wrongly sized 50MB+ of VRAM back from the caching allocator right now
             synchronize()
-            del STREAM_CAST_BUFFERS[offload_stream]
+            del manager.stream_cast_buffers[offload_stream]
             del cast_buffer
             soft_empty_cache()
         with wf_context:
             cast_buffer = torch.empty((size), dtype=torch.int8, device=device)
-            STREAM_CAST_BUFFERS[offload_stream] = cast_buffer
+            manager.stream_cast_buffers[offload_stream] = cast_buffer
 
-        if  size > LARGEST_CASTED_WEIGHT[1]:
-            LARGEST_CASTED_WEIGHT = (ref, size)
+        if size > manager.largest_casted_weight[1]:
+            manager.largest_casted_weight = (ref, size)
 
     return cast_buffer
 
 def get_aimdo_cast_buffer(offload_stream, device):
-    cast_buffer = STREAM_AIMDO_CAST_BUFFERS.get(offload_stream, None)
+    manager = get_model_manager()
+    cast_buffer = manager.stream_aimdo_cast_buffers.get(offload_stream, None)
     if cast_buffer is None:
         cast_buffer = comfy_aimdo.vram_buffer.VRAMBuffer(DEFAULT_AIMDO_CAST_BUFFER_RESERVATION_SIZE, device.index)
-        STREAM_AIMDO_CAST_BUFFERS[offload_stream] = cast_buffer
+        manager.stream_aimdo_cast_buffers[offload_stream] = cast_buffer
     return cast_buffer
 
 def reset_cast_buffers():
-    global LARGEST_CASTED_WEIGHT
-    global LARGEST_AIMDO_CASTED_WEIGHT
-
-    LARGEST_CASTED_WEIGHT = (None, 0)
-    LARGEST_AIMDO_CASTED_WEIGHT = (None, 0)
-    for offload_stream in set(STREAM_CAST_BUFFERS) | set(STREAM_AIMDO_CAST_BUFFERS):
+    manager = get_model_manager()
+    manager.largest_casted_weight = (None, 0)
+    manager.largest_aimdo_casted_weight = (None, 0)
+    for offload_stream in set(manager.stream_cast_buffers) | set(manager.stream_aimdo_cast_buffers):
         if offload_stream is not None:
             offload_stream.synchronize()
     synchronize()
 
-    for mmap_obj in DIRTY_MMAPS:
+    for mmap_obj in manager.dirty_mmaps:
         mmap_obj.bounce()
-    DIRTY_MMAPS.clear()
+    manager.dirty_mmaps.clear()
 
-    for module in CROSS_STEP_STATE:
+    for module in manager.cross_step_state:
         del module._comfy_cross_step_state
-    CROSS_STEP_STATE.clear()
+    manager.cross_step_state.clear()
 
-    for loaded_model in get_model_manager().loaded_model_records():
+    for loaded_model in manager.loaded_model_records():
         model = loaded_model.model
         if model is not None and model.is_dynamic():
             pin_state = model.model.dynamic_pins[model.load_device]
@@ -1661,24 +1670,25 @@ def reset_cast_buffers():
             for subset in ("patches", "patches-loaded", "patches-fast"):
                 pin_state[subset] = (comfy_aimdo.host_buffer.HostBuffer(0, 8 * 1024 * 1024, pinned_hostbuf_size(model.model_size())), [], [-1], [0], [0], {})
 
-    STREAM_CAST_BUFFERS.clear()
-    STREAM_AIMDO_CAST_BUFFERS.clear()
+    manager.stream_cast_buffers.clear()
+    manager.stream_aimdo_cast_buffers.clear()
     soft_empty_cache()
 
 def get_offload_stream(device):
-    stream_counter = stream_counters.get(device, 0)
+    manager = get_model_manager()
+    stream_counter = manager.stream_counters.get(device, 0)
     if NUM_STREAMS == 0:
         return None
 
     if torch.compiler.is_compiling():
         return None
 
-    if device in STREAMS:
-        ss = STREAMS[device]
+    if device in manager.streams:
+        ss = manager.streams[device]
         #Sync the oldest stream in the queue with the current
         ss[stream_counter].wait_stream(current_stream(device))
         stream_counter = (stream_counter + 1) % len(ss)
-        stream_counters[device] = stream_counter
+        manager.stream_counters[device] = stream_counter
         return ss[stream_counter]
     elif is_device_cuda(device):
         ss = []
@@ -1686,9 +1696,9 @@ def get_offload_stream(device):
             s1 = torch.cuda.Stream(device=device, priority=0)
             s1.as_context = torch.cuda.stream
             ss.append(s1)
-        STREAMS[device] = ss
+        manager.streams[device] = ss
         s = ss[stream_counter]
-        stream_counters[device] = stream_counter
+        manager.stream_counters[device] = stream_counter
         return s
     elif is_device_xpu(device):
         ss = []
@@ -1696,9 +1706,9 @@ def get_offload_stream(device):
             s1 = torch.xpu.Stream(device=device, priority=0)
             s1.as_context = torch.xpu.stream
             ss.append(s1)
-        STREAMS[device] = ss
+        manager.streams[device] = ss
         s = ss[stream_counter]
-        stream_counters[device] = stream_counter
+        manager.stream_counters[device] = stream_counter
         return s
     elif is_device_npu(device):
         ss = []
@@ -1708,9 +1718,9 @@ def get_offload_stream(device):
             s1 = torch.npu.Stream(device=device, priority=0)
             s1.as_context = torch.npu.stream
             ss.append(s1)
-        STREAMS[device] = ss
+        manager.streams[device] = ss
         s = ss[stream_counter]
-        stream_counters[device] = stream_counter
+        manager.stream_counters[device] = stream_counter
         return s
     return None
 
@@ -1778,10 +1788,6 @@ def cast_to_device(tensor, device, dtype, copy=False):
     return cast_to(tensor, dtype=dtype, device=device, non_blocking=non_blocking, copy=copy)
 
 
-PINNED_MEMORY = {}
-TOTAL_PINNED_MEMORY = 0
-MAX_PINNED_MEMORY = -1
-
 def get_disk_swap_total():
     if not os.path.exists("/proc/swaps"):
         return 0
@@ -1799,22 +1805,27 @@ def get_disk_swap_total():
         logging.warning("Could not get amount of swap memory on system.")
     return total
 
-if not args.disable_pinned_memory:
-    if is_nvidia() or is_amd():
-        ram = get_total_memory(torch.device("cpu"))
-        if WINDOWS:
-            MAX_PINNED_MEMORY = ram * 0.40  # Windows limit is apparently 50%
-        else:
-            swap = 0 if dinkster_comfy.system_memory.cgroup_memory_limit() is not None else get_disk_swap_total()
-            MAX_PINNED_MEMORY = max(ram * 0.40, min(ram * 0.90, ram - 4 * 1024 ** 3, ram + swap - 16 * 1024 ** 3))
-        logging.info("Enabled pinned memory {}".format(MAX_PINNED_MEMORY // (1024 * 1024)))
+def maximum_pinned_memory():
+    if args.disable_pinned_memory or not (is_nvidia() or is_amd()):
+        return -1
+    ram = get_total_memory(torch.device("cpu"))
+    if WINDOWS:
+        maximum = ram * 0.40  # Windows limit is apparently 50%
+    else:
+        swap = 0 if dinkster_comfy.system_memory.cgroup_memory_limit() is not None else get_disk_swap_total()
+        maximum = max(ram * 0.40, min(ram * 0.90, ram - 4 * 1024 ** 3, ram + swap - 16 * 1024 ** 3))
+    logging.info("Enabled pinned memory {}".format(maximum // (1024 * 1024)))
+    return maximum
+
+
+get_model_manager().max_pinned_memory = maximum_pinned_memory()
 
 PINNING_ALLOWED_TYPES = set(["Tensor", "Parameter", "QuantizedTensor"])
 
 def pinned_hostbuf_size(size):
     if args.high_ram:
         return max(0, int(size * 2))
-    return max(0, int(min(size, MAX_PINNED_MEMORY) * 2))
+    return max(0, int(min(size, get_model_manager().max_pinned_memory) * 2))
 
 def discard_cuda_async_error():
     try:
@@ -1827,8 +1838,8 @@ def discard_cuda_async_error():
         pass
 
 def pin_memory(tensor, evict_active=True):
-    global TOTAL_PINNED_MEMORY
-    if MAX_PINNED_MEMORY <= 0:
+    manager = get_model_manager()
+    if manager.max_pinned_memory <= 0:
         return False
 
     if type(tensor).__name__ not in PINNING_ALLOWED_TYPES:
@@ -1856,8 +1867,8 @@ def pin_memory(tensor, evict_active=True):
         return False
 
     if torch.cuda.cudart().cudaHostRegister(ptr, size, 1) == 0:
-        PINNED_MEMORY[ptr] = size
-        TOTAL_PINNED_MEMORY += size
+        manager.pinned_memory[ptr] = size
+        manager.add_pinned_memory(size)
         return True
     else:
         logging.warning("Pin error.")
@@ -1866,8 +1877,8 @@ def pin_memory(tensor, evict_active=True):
     return False
 
 def unpin_memory(tensor):
-    global TOTAL_PINNED_MEMORY
-    if MAX_PINNED_MEMORY <= 0:
+    manager = get_model_manager()
+    if manager.max_pinned_memory <= 0:
         return False
 
     if not is_device_cpu(tensor.device):
@@ -1876,7 +1887,7 @@ def unpin_memory(tensor):
     ptr = tensor.data_ptr()
     size = tensor.nbytes
 
-    size_stored = PINNED_MEMORY.get(ptr, None)
+    size_stored = manager.pinned_memory.get(ptr, None)
     if size_stored is None:
         logging.warning("Tried to unpin tensor not pinned by ComfyUI")
         return False
@@ -1886,8 +1897,8 @@ def unpin_memory(tensor):
         return False
 
     if torch.cuda.cudart().cudaHostUnregister(ptr) == 0:
-        size = PINNED_MEMORY.pop(ptr)
-        TOTAL_PINNED_MEMORY -= size
+        size = manager.pinned_memory.pop(ptr)
+        manager.release_pinned_memory(size)
         return True
     else:
         logging.warning("Unpin error.")
@@ -2270,9 +2281,9 @@ def extended_fp16_support():
 
     return True
 
-LORA_COMPUTE_DTYPES = {}
 def lora_compute_dtype(device):
-    dtype = LORA_COMPUTE_DTYPES.get(device, None)
+    manager = get_model_manager()
+    dtype = manager.lora_compute_dtypes.get(device, None)
     if dtype is not None:
         return dtype
 
@@ -2281,7 +2292,7 @@ def lora_compute_dtype(device):
     else:
         dtype = torch.float32
 
-    LORA_COMPUTE_DTYPES[device] = dtype
+    manager.lora_compute_dtypes[device] = dtype
     return dtype
 
 def synchronize():
@@ -2355,25 +2366,19 @@ def debug_memory_summary():
 class InterruptProcessingException(BaseException):
     pass
 
-interrupt_processing_mutex = threading.RLock()
-
-interrupt_processing = False
 def interrupt_current_processing(value=True):
-    global interrupt_processing
-    global interrupt_processing_mutex
-    with interrupt_processing_mutex:
-        interrupt_processing = value
+    manager = get_model_manager()
+    with manager.interrupt_processing_mutex:
+        manager.interrupt_processing = value
 
 def processing_interrupted():
-    global interrupt_processing
-    global interrupt_processing_mutex
-    with interrupt_processing_mutex:
-        return interrupt_processing
+    manager = get_model_manager()
+    with manager.interrupt_processing_mutex:
+        return manager.interrupt_processing
 
 def throw_exception_if_processing_interrupted():
-    global interrupt_processing
-    global interrupt_processing_mutex
-    with interrupt_processing_mutex:
-        if interrupt_processing:
-            interrupt_processing = False
+    manager = get_model_manager()
+    with manager.interrupt_processing_mutex:
+        if manager.interrupt_processing:
+            manager.interrupt_processing = False
             raise InterruptProcessingException()

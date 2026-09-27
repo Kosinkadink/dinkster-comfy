@@ -43,18 +43,18 @@ def test_npu_offload_streams(monkeypatch):
     monkeypatch.setattr(model_management.torch, "npu", npu, raising=False)
     monkeypatch.setattr(model_management.torch.compiler, "is_compiling", lambda: False)
     monkeypatch.setattr(model_management, "NUM_STREAMS", 2)
-    monkeypatch.setattr(model_management, "STREAMS", {})
-    monkeypatch.setattr(model_management, "stream_counters", {})
+    manager = model_management.ModelManager()
+    monkeypatch.setattr(model_management, "_model_manager", manager)
 
     assert model_management.get_offload_stream(device) is first_stream
     assert model_management.get_offload_stream(device) is second_stream
     assert model_management.get_offload_stream(device) is first_stream
-    assert model_management.STREAMS[device] == [first_stream, second_stream]
+    assert manager.streams[device] == [first_stream, second_stream]
     assert first_stream.as_context is stream_context
     assert second_stream.as_context is stream_context
     assert first_stream.waited_for is current_stream
     assert second_stream.waited_for is current_stream
-    assert model_management.stream_counters[device] == 0
+    assert manager.stream_counters[device] == 0
     assert npu.Stream.call_count == 2
     assert npu.Stream.call_args_list == [
         call(device=device, priority=0),
@@ -152,3 +152,35 @@ def test_model_manager_cannot_be_replaced_while_models_are_loaded(monkeypatch):
 
     with pytest.raises(RuntimeError, match="while models are loaded"):
         model_management.set_model_manager(model_management.ModelManager())
+
+
+def test_process_state_belongs_to_active_model_manager(monkeypatch):
+    class MmapRefs:
+        _comfy_tensor_mmap_refs = (object(),)
+
+    first = model_management.ModelManager()
+    second = model_management.ModelManager()
+    monkeypatch.setattr(model_management, "_model_manager", first)
+
+    model_management.mark_mmap_dirty(MmapRefs())
+    model_management.interrupt_current_processing()
+    first.add_pinned_memory(12)
+
+    assert len(first.dirty_mmaps) == 1
+    assert model_management.processing_interrupted()
+    assert first.total_pinned_memory == 12
+    assert second.dirty_mmaps == set()
+    assert not second.interrupt_processing
+    assert second.total_pinned_memory == 0
+
+
+def test_replacing_manager_preserves_process_pin_policy(monkeypatch):
+    current = model_management.ModelManager()
+    current.max_pinned_memory = 123
+    replacement = model_management.ModelManager()
+    monkeypatch.setattr(model_management, "_model_manager", current)
+
+    model_management.set_model_manager(replacement)
+
+    assert model_management.get_model_manager() is replacement
+    assert replacement.max_pinned_memory == 123
