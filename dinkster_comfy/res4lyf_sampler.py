@@ -127,7 +127,8 @@ def sampler_function(name: str, options: Mapping[str, object] | None = None) -> 
     ) -> torch.Tensor:
         del disable
         args = dict(extra_args or {})
-        seed = int(args.get("seed", 0))
+        seed_value = args.get("seed")
+        seed = 0 if seed_value is None else int(seed_value)
         sampling = model.inner_model.inner_model.model_sampling  # type: ignore[attr-defined]
 
         def denoise(value: torch.Tensor, sigma: float) -> torch.Tensor:

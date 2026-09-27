@@ -47,14 +47,15 @@ class _RecordingStream:
 
 
 class _ComfyModel:
-    def __init__(self, sampling: object) -> None:
+    def __init__(self, sampling: object, expected_seed: int | None = 29) -> None:
         sampling.sigma_min = 0.01
         sampling.sigma_max = 1.0
         self.inner_model = type("Inner", (), {"inner_model": type("Base", (), {"model_sampling": sampling})()})()
         self.sigma_batches: list[torch.Tensor] = []
+        self.expected_seed = expected_seed
 
     def __call__(self, value: torch.Tensor, sigma: torch.Tensor, **extra_args: object) -> torch.Tensor:
-        assert extra_args["seed"] == 29
+        assert extra_args["seed"] == self.expected_seed
         self.sigma_batches.append(sigma)
         return value / (1.0 + sigma.reshape((-1,) + (1,) * (value.ndim - 1)))
 
@@ -195,6 +196,17 @@ def test_comfy_adapter_refuses_v_prediction_instead_of_treating_it_as_eps() -> N
             torch.tensor([1.0, 0.0]),
             extra_args={"seed": 29},
         )
+
+
+def test_comfy_adapter_uses_deterministic_default_when_optional_seed_is_none() -> None:
+    initial = _tensor(GOLDEN["initial"])
+    sigmas = torch.tensor([1.0, 0.0])
+    sample = sampler_function("res_2m")
+
+    first = sample(_ComfyModel(model_sampling.EPS(), None), initial, sigmas, extra_args={"seed": None})
+    second = sample(_ComfyModel(model_sampling.EPS(), None), initial, sigmas, extra_args={"seed": None})
+
+    assert torch.equal(first, second)
 
 
 def test_ordinary_sampler_assembly_still_uses_stock_function() -> None:
