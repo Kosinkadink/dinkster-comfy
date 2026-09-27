@@ -44,6 +44,11 @@ from dinkster_comfy.internal_logging import detail
 from dinkster_comfy.patch_program import ModuleInsertionEntry, PatchProgram
 from dinkster_comfy.quant_ops import QuantizedTensor
 from dinkster_comfy.patcher_extension import CallbacksMP, PatcherInjection, WrappersMP
+from dinkster_comfy.weight_adapter.base import WeightAdapterBase, WeightAdapterTrainBase
+from dinkster_comfy.weight_adapter.bypass import (
+    ScheduledBypassAdapter,
+    ScheduledBypassMaterializer,
+)
 
 import comfy_aimdo.model_vbar
 
@@ -211,21 +216,38 @@ class LowVramPatch:
 
 class HookWeightPatch:
     def __init__(self, patcher, key):
-        self.patcher = weakref.ref(patcher)
+        self.model = weakref.ref(patcher.model)
+        self.fallback_patcher = weakref.ref(patcher)
         self.key = key
 
     def __call__(self, weight):
-        patcher = self.patcher()
+        model = self.model()
+        patcher = getattr(model, "current_patcher", None)
+        if patcher is None:
+            patcher = self.fallback_patcher()
         if patcher is None or patcher.current_hooks is None:
             return weight
         patches = patcher.get_combined_hook_patches(patcher.current_hooks).get(self.key)
         if not patches:
             return weight
-        return dinkster_comfy.lora.calculate_weight(
+        output_dtype = weight.dtype
+        intermediate_dtype = torch.float32
+        weight = dinkster_comfy.model_management.cast_to_device(
+            weight,
+            weight.device,
+            intermediate_dtype,
+            copy=True,
+        )
+        weight = dinkster_comfy.lora.calculate_weight(
             patches,
             weight,
             self.key,
-            intermediate_dtype=weight.dtype,
+            intermediate_dtype=intermediate_dtype,
+        )
+        return dinkster_comfy.float.stochastic_rounding(
+            weight,
+            output_dtype,
+            seed=dinkster_comfy.utils.string_to_seed(self.key),
         )
 
 LOWVRAM_PATCH_ESTIMATE_MATH_FACTOR = 2
@@ -396,6 +418,9 @@ class ModelPatcher:
         self.patch_materializers = {}
         self.register_patch_materializer(
             "dinkster.patcher_injection", _PatcherInjectionMaterializer()
+        )
+        self.register_patch_materializer(
+            "dinkster.scheduled_bypass", ScheduledBypassMaterializer()
         )
         self._materialized_insertions = []
         self._patch_scratch = {}
@@ -660,6 +685,8 @@ class ModelPatcher:
         if self.forced_hooks != clone.forced_hooks:
             return False
         if self.hook_patches.keys() != clone.hook_patches.keys():
+            return False
+        if self.patch_program.digest != clone.patch_program.digest:
             return False
         if self.attachments.keys() != clone.attachments.keys():
             return False
@@ -1135,7 +1162,7 @@ class ModelPatcher:
         self._validate_patch_program()
         with self.use_ejected():
             self.unpatch_hooks()
-            self.hook_weight_function_keys.clear()
+            self._refresh_hook_weight_function_keys()
             mem_counter = 0
             patch_counter = 0
             lowvram_counter = 0
@@ -1566,7 +1593,7 @@ class ModelPatcher:
                 namespace=namespace,
                 site="model.root",
                 recipe="dinkster.additional_model",
-                resources=model,
+                resources=model.clone(),
                 order=order,
                 activation=0.0,
                 clone_policy="copy",
@@ -1653,6 +1680,14 @@ class ModelPatcher:
         if self.hook_patches_backup is not None:
             self.hook_patches = self.hook_patches_backup
             self.hook_patches_backup = None
+            self._refresh_hook_weight_function_keys()
+            namespaces = {
+                entry.namespace
+                for entry in self.patch_program.module_insertions()
+                if entry.namespace.startswith("scheduled-bypass:")
+            }
+            for namespace in namespaces:
+                self.set_module_insertions(namespace, ())
 
     def set_hook_mode(self, hook_mode: dinkster_comfy.hooks.EnumHookMode):
         self.hook_mode = hook_mode
@@ -1731,6 +1766,8 @@ class ModelPatcher:
             current_hook_patches: dict[str,list] = self.hook_patches.get(hook.hook_ref, {})
             p = set()
             model_sd = self.model.state_dict()
+            bypass_entries = []
+            bypass_namespace = f"scheduled-bypass:{len(self.hook_patches)}"
             for k in patches:
                 offset = None
                 function = None
@@ -1744,10 +1781,38 @@ class ModelPatcher:
 
                 if key in model_sd:
                     p.add(k)
+                    patch = patches[k]
+                    if (
+                        isinstance(model_sd[key], QuantizedTensor)
+                        and isinstance(patch, (WeightAdapterBase, WeightAdapterTrainBase))
+                    ):
+                        resource = ScheduledBypassAdapter.create(
+                            key,
+                            patch,
+                            strength_patch,
+                            hook.contribution_gain.with_timeline(
+                                hook.hook_keyframe.contribution_gain.timeline
+                            ),
+                            hook.hook_ref,
+                        )
+                        bypass_entries.append(
+                            ModuleInsertionEntry.create(
+                                namespace=bypass_namespace,
+                                site="model.root",
+                                recipe="dinkster.scheduled_bypass",
+                                resources=resource,
+                                order=len(bypass_entries),
+                                clone_policy="copy",
+                            )
+                        )
+                        continue
                     current_patches: list[tuple] = current_hook_patches.get(key, [])
                     current_patches.append((strength_patch, patches[k], strength_model, offset, function))
                     current_hook_patches[key] = current_patches
             self.hook_patches[hook.hook_ref] = current_hook_patches
+            self._refresh_hook_weight_function_keys()
+            if bypass_entries:
+                self.set_module_insertions(bypass_namespace, bypass_entries)
             # since should care about these patches too to determine if same model, reroll patches_uuid
             self.patches_uuid = uuid.uuid4()
             return list(p)
@@ -1760,13 +1825,14 @@ class ModelPatcher:
                 hook_patches: dict = self.hook_patches.get(hook.hook_ref, {})
                 for key in hook_patches.keys():
                     current_patches: list[tuple] = combined_patches.get(key, [])
-                    if math.isclose(hook.strength, 1.0):
+                    gain = hook.gain_for(site=key)
+                    if math.isclose(gain, 1.0):
                         current_patches.extend(hook_patches[key])
                     else:
                         # patches are stored as tuples: (strength_patch, (tuple_with_weights,), strength_model)
                         for patch in hook_patches[key]:
                             new_patch = list(patch)
-                            new_patch[0] *= hook.strength
+                            new_patch[0] *= gain
                             current_patches.append(tuple(new_patch))
                     combined_patches[key] = current_patches
         return combined_patches
@@ -1777,6 +1843,22 @@ class ModelPatcher:
             for patches in self.hook_patches.values()
             for key in patches
         }
+
+    def _refresh_hook_weight_function_keys(self):
+        keys = set()
+        for key in self.get_hook_patch_keys():
+            module_key, separator, parameter = key.rpartition(".")
+            if not separator:
+                module_key = ""
+            if parameter not in ("weight", "bias"):
+                continue
+            module = self.model if not module_key else self.model.get_submodule(module_key)
+            if (
+                hasattr(module, f"{parameter}_function")
+                and not isinstance(getattr(module, parameter), QuantizedTensor)
+            ):
+                keys.add(key)
+        self.hook_weight_function_keys = keys
 
     def apply_hooks(self, hooks: dinkster_comfy.hooks.HookGroup, transformer_options: dict=None, force_apply=False):
         # TODO: return transformer_options dict with any additions from hooks

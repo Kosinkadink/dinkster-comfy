@@ -1,11 +1,20 @@
 import pytest
 import torch
 
+import dinkster_comfy.model_patcher as model_patcher_module
 from dinkster_comfy.contribution_gain import ContributionGain, GainKeyframe, GainTimeline
 from dinkster_comfy.controlnet import ControlBase
-from dinkster_comfy.hooks import Hook, HookGroup, HookKeyframe, HookKeyframeGroup, WeightHook
+from dinkster_comfy.hooks import (
+    Hook,
+    HookGroup,
+    HookKeyframe,
+    HookKeyframeGroup,
+    TransformerOptionsHook,
+    WeightHook,
+)
 from dinkster_comfy.model_patcher import HookWeightPatch, ModelPatcher
 from dinkster_comfy.samplers import realize_contribution_gains
+from dinkster_comfy.weight_adapter.base import WeightAdapterBase
 
 
 def test_constant_gain_realizes_once_for_each_executed_sigma():
@@ -160,3 +169,97 @@ def test_float_weight_overlay_reads_the_active_realized_hook_gain_per_call():
     patcher.current_hooks = active
 
     assert torch.equal(overlay(weight), torch.full((2, 2), 0.25))
+
+
+def test_float_weight_overlay_is_not_baked_before_model_load():
+    model = torch.nn.Linear(2, 2, bias=False)
+    model.weight.data.zero_()
+    model.weight_function = []
+    patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+    hook = WeightHook()
+    patcher.add_hook_patches(
+        hook,
+        {"weight": ("diff", (torch.ones(2, 2),))},
+    )
+    active = HookGroup()
+    active.add(hook)
+
+    patcher.patch_hooks(active)
+
+    assert patcher.hook_weight_function_keys == {"weight"}
+    assert torch.equal(model.weight, torch.zeros(2, 2))
+
+
+class _BypassAdapter(WeightAdapterBase):
+    def __init__(self):
+        self.weights = (torch.ones(1),)
+
+    def h(self, x, base_out):
+        return torch.ones_like(base_out) * self.multiplier
+
+
+def test_quantized_scheduled_adapter_uses_bypass_without_changing_base_weight(monkeypatch):
+    monkeypatch.setattr(model_patcher_module, "QuantizedTensor", torch.Tensor)
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2, bias=False))
+    model[0].weight.data.zero_()
+    patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+    hook = WeightHook()
+
+    applied = patcher.add_hook_patches(
+        hook,
+        {"0.weight": _BypassAdapter()},
+        strength_patch=2.0,
+    )
+
+    assert applied == ["0.weight"]
+    assert patcher.hook_patches[hook.hook_ref] == {}
+    assert patcher.get_module_insertions()[0].recipe == "dinkster.scheduled_bypass"
+
+    patcher.inject_model()
+    inputs = torch.ones(1, 2)
+    assert torch.equal(model(inputs), torch.zeros(1, 2))
+
+    active = HookGroup()
+    hook.current_gain = 0.25
+    active.add(hook)
+    patcher.current_hooks = active
+    assert torch.equal(model(inputs), torch.full((1, 2), 0.5))
+
+    patcher.eject_model()
+    assert torch.equal(model(inputs), torch.zeros(1, 2))
+
+
+def test_program_identity_distinguishes_scheduled_bypass_gain_declarations(monkeypatch):
+    monkeypatch.setattr(model_patcher_module, "QuantizedTensor", torch.Tensor)
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2, bias=False))
+    first = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+    second = first.clone()
+    first_hook = WeightHook()
+    second_hook = WeightHook()
+    second_hook.hook_keyframe.add(HookKeyframe(0.5, 0.0))
+
+    first.add_hook_patches(first_hook, {"0.weight": _BypassAdapter()})
+    second.add_hook_patches(second_hook, {"0.weight": _BypassAdapter()})
+
+    assert first.patch_program.digest != second.patch_program.digest
+    assert not first.clone_has_same_weights(second)
+
+
+def test_attention_term_uses_realized_site_gain():
+    def add_one(query, key, value, extra_options):
+        return query + 1, key + 1, value + 1
+
+    hook = TransformerOptionsHook(
+        {"patches": {"attn1_patch": [add_one]}}
+    )
+    hook.realized_gain = ContributionGain(
+        site_gains=(("attn1_patch", 0.25),)
+    ).realize(torch.tensor([1.0, 0.0]))
+    hook.current_timestep = 1.0
+    options = {}
+
+    hook.on_apply_hooks(None, options)
+    patch = options["patches"]["attn1_patch"][0]
+    inputs = (torch.zeros(1), torch.zeros(1), torch.zeros(1))
+
+    assert patch(*inputs, {}) == tuple(torch.full((1,), 0.25) for _ in range(3))

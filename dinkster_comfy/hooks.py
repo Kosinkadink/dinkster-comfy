@@ -102,8 +102,10 @@ class Hook:
         '''Optional string ID to identify hook; useful if need to consolidate duplicates at registration time.'''
         self.hook_keyframe = hook_keyframe if hook_keyframe else HookKeyframeGroup()
         '''Gain declaration used to realize strength against the executed timeline.'''
+        self.contribution_gain = ContributionGain()
         self.realized_gain = None
         self.current_gain = 1.0
+        self.current_timestep = None
         self.hook_scope = hook_scope
         '''Scope of where this hook should apply in terms of the conds used in sampling run.'''
         self.custom_should_register = default_should_register
@@ -117,21 +119,35 @@ class Hook:
         self.reset()
 
     def realize_gain(self, sigmas: torch.Tensor, model: BaseModel):
-        gain = self.hook_keyframe.contribution_gain
+        gain = self.contribution_gain.with_timeline(
+            self.hook_keyframe.contribution_gain.timeline
+        )
         self.realized_gain = gain.realize(sigmas, model.model_sampling.percent_to_sigma)
-        self.current_gain = self.realized_gain.timeline_gains[0]
+        self.current_timestep = self.realized_gain.sigmas[0]
+        self.current_gain = self.realized_gain.scalar_gain(self.current_timestep)
 
     def prepare_current_gain(self, timestep: torch.Tensor) -> bool:
         if self.realized_gain is None:
             return False
+        self.current_timestep = timestep
         gain = self.realized_gain.scalar_gain(timestep)
         changed = not math.isclose(gain, self.current_gain)
         self.current_gain = gain
         return changed
 
+    def gain_for(self, *, site: str | None = None, lane: str | None = None) -> float:
+        if self.realized_gain is None or self.current_timestep is None:
+            return self.current_gain
+        return self.realized_gain.scalar_gain(
+            self.current_timestep,
+            site=site,
+            lane=lane,
+        )
+
     def reset(self):
         self.realized_gain = None
         self.current_gain = 1.0
+        self.current_timestep = None
 
     def clone(self):
         c: Hook = self.__class__()
@@ -139,8 +155,10 @@ class Hook:
         c.hook_ref = self.hook_ref
         c.hook_id = self.hook_id
         c.hook_keyframe = self.hook_keyframe
+        c.contribution_gain = self.contribution_gain
         c.realized_gain = self.realized_gain
         c.current_gain = self.current_gain
+        c.current_timestep = self.current_timestep
         c.hook_scope = self.hook_scope
         c.custom_should_register = self.custom_should_register
         return c
@@ -278,20 +296,67 @@ class TransformerOptionsHook(Hook):
             return False
         # NOTE: to_load_options will be used to manually load patches/wrappers/callbacks from hooks
         self._skip_adding = False
+        transformers_dict = _gain_scaled_attention_patches(self, self.transformers_dict)
         if self.hook_scope == EnumHookScope.AllConditioning:
-            add_model_options = {"transformer_options": self.transformers_dict,
-                                 "to_load_options": self.transformers_dict}
+            add_model_options = {"transformer_options": transformers_dict,
+                                 "to_load_options": transformers_dict}
             # skip_adding if included in AllConditioning to avoid double loading
             self._skip_adding = True
         else:
-            add_model_options = {"to_load_options": self.transformers_dict}
+            add_model_options = {"to_load_options": transformers_dict}
         registered.add(self)
         dinkster_comfy.patcher_extension.merge_nested_dicts(model_options, add_model_options, copy_dict1=False)
         return True
 
     def on_apply_hooks(self, model: ModelPatcher, transformer_options: dict[str]):
         if not self._skip_adding:
-            dinkster_comfy.patcher_extension.merge_nested_dicts(transformer_options, self.transformers_dict, copy_dict1=False)
+            dinkster_comfy.patcher_extension.merge_nested_dicts(
+                transformer_options,
+                _gain_scaled_attention_patches(self, self.transformers_dict),
+                copy_dict1=False,
+            )
+
+
+class _ContributionGainAttentionPatch:
+    def __init__(self, hook, site, patch):
+        self.hook = hook
+        self.site = site
+        self.patch = patch
+
+    def __call__(self, *args, **kwargs):
+        result = self.patch(*args, **kwargs)
+        gain = self.hook.gain_for(site=self.site)
+        if isinstance(result, tuple):
+            return tuple(
+                original + (patched - original) * gain
+                if isinstance(original, torch.Tensor) and isinstance(patched, torch.Tensor)
+                else patched
+                for original, patched in zip(args, result)
+            )
+        if isinstance(result, torch.Tensor) and args and isinstance(args[0], torch.Tensor):
+            return args[0] + (result - args[0]) * gain
+        return result
+
+
+def _gain_scaled_attention_patches(hook, transformers_dict):
+    if not transformers_dict or "patches" not in transformers_dict:
+        return transformers_dict
+    attention_sites = {
+        "attn1_patch",
+        "attn2_patch",
+        "attn1_output_patch",
+        "attn2_output_patch",
+    }
+    patches = transformers_dict["patches"]
+    scaled = {
+        site: [
+            _ContributionGainAttentionPatch(hook, site, patch) for patch in values
+        ]
+        if site in attention_sites
+        else values
+        for site, values in patches.items()
+    }
+    return {**transformers_dict, "patches": scaled}
 
 WrapperHook = TransformerOptionsHook
 '''Only here for backwards compatibility, WrapperHook is identical to TransformerOptionsHook.'''
