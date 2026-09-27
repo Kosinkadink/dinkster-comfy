@@ -17,6 +17,9 @@ from dinkster_comfy.sampler_assembly import Parameterization, SamplerInfo, Solve
 
 GOLDEN = json.loads((Path(__file__).parent / "goldens/res4lyf_rk_goldens.json").read_text())
 TRAJECTORY_ATOL = 2e-5
+# The planner emits float64 sigmas, then the model boundary rounds to float32.
+# Recorded max drift is 4.17e-7; 5e-7 leaves less than 20% headroom.
+SIGMA_F32_BOUNDARY_ATOL = 5e-7
 
 
 def _tensor(values: list[float], dtype: torch.dtype = torch.float32) -> torch.Tensor:
@@ -136,7 +139,9 @@ def test_rk_engine_replays_recorded_reference(case_name: str) -> None:
 
     _assert_values(model.sigmas, case["model_call_sigmas"], atol=1e-7)
     assert [event.evaluation for event in substeps] == list(range(len(substeps)))
-    assert [event.sigma for event in substeps] == pytest.approx(model.sigmas, abs=5e-7, rel=0.0)
+    assert [event.sigma for event in substeps] == pytest.approx(
+        model.sigmas, abs=SIGMA_F32_BOUNDARY_ATOL, rel=0.0
+    )
     assert [event.outer_step for event in substeps] == sorted(event.outer_step for event in substeps)
     for (tag, draw), expected in zip(draws, case["noise_draws"], strict=True):
         assert tag == expected["stream"]
