@@ -21,6 +21,7 @@ import dinkster_comfy.window_execution
 import dinkster_comfy.multigpu
 import dinkster_comfy.utils
 from dinkster_comfy.internal_logging import detail
+from dinkster_comfy.res4lyf_sampler import RES4LYF_SAMPLER_NAMES, sampler_function as res4lyf_sampler_function
 import scipy.stats
 import numpy
 
@@ -974,7 +975,7 @@ KSAMPLER_NAMES = ["euler", "euler_cfg_pp", "euler_ancestral", "euler_ancestral_c
                   "lms", "dpm_fast", "dpm_adaptive", "dpmpp_2s_ancestral", "dpmpp_2s_ancestral_cfg_pp", "dpmpp_sde", "dpmpp_sde_gpu",
                   "dpmpp_2m", "dpmpp_2m_cfg_pp", "dpmpp_2m_sde", "dpmpp_2m_sde_gpu", "dpmpp_2m_sde_heun", "dpmpp_2m_sde_heun_gpu", "dpmpp_3m_sde", "dpmpp_3m_sde_gpu", "ddpm", "lcm",
                   "ipndm", "ipndm_v", "deis", "cfgpp_ud10_ab", "res_multistep", "res_multistep_cfg_pp", "res_multistep_ancestral", "res_multistep_ancestral_cfg_pp",
-                  "gradient_estimation", "gradient_estimation_cfg_pp", "er_sde", "seeds_2", "seeds_3", "sa_solver", "sa_solver_pece"]
+                  "gradient_estimation", "gradient_estimation_cfg_pp", "er_sde", "seeds_2", "seeds_3", "sa_solver", "sa_solver_pece", *RES4LYF_SAMPLER_NAMES]
 
 class KSAMPLER(Sampler):
     def __init__(self, sampler_function, extra_options={}, inpaint_options={}):
@@ -1387,13 +1388,15 @@ def calculate_sigmas(model_sampling: object, scheduler_name: str, steps: int) ->
         return handler.handler(model_sampling, steps)
     return handler.handler(n=steps, sigma_min=float(model_sampling.sigma_min), sigma_max=float(model_sampling.sigma_max))
 
-def sampler_object(name):
+def sampler_object(name, options=None):
     if name == "uni_pc":
         sampler = KSAMPLER(uni_pc.sample_unipc)
     elif name == "uni_pc_bh2":
         sampler = KSAMPLER(uni_pc.sample_unipc_bh2)
     elif name == "ddim":
         sampler = ksampler("euler", inpaint_options={"random": True})
+    elif name in RES4LYF_SAMPLER_NAMES:
+        sampler = KSAMPLER(res4lyf_sampler_function(name, options))
     else:
         sampler = ksampler(name)
     return sampler
