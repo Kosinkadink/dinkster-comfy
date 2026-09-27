@@ -39,6 +39,7 @@ import dinkster_comfy.utils
 import comfy_aimdo.host_buffer
 from dinkster_comfy.comfy_types import UnetWrapperFunction
 from dinkster_comfy.internal_logging import detail
+from dinkster_comfy.patch_program import PatchProgram
 from dinkster_comfy.quant_ops import QuantizedTensor
 from dinkster_comfy.patcher_extension import CallbacksMP, PatcherInjection, WrappersMP
 
@@ -348,7 +349,7 @@ class ModelPatcher:
         elif self.model.device is None:
             self.model.device = offload_device
 
-        self.patches = {}
+        self._set_patch_program(PatchProgram())
         self.backup = {}
         self.backup_buffers = {}
         self.object_patches = {}
@@ -444,9 +445,7 @@ class ModelPatcher:
             model_override = self.get_clone_model_override()
 
         n = class_(model_override[0], self.load_device, self.offload_device, self.model_size(), weight_inplace_update=self.weight_inplace_update, fast_disk=self.fast_disk)
-        n.patches = {}
-        for k in self.patches:
-            n.patches[k] = self.patches[k][:]
+        n._set_patch_program(self.patch_program)
         n.patches_uuid = self.patches_uuid
 
         n.object_patches = self.object_patches.copy()
@@ -840,10 +839,23 @@ class ModelPatcher:
         if hasattr(self.model, "get_dtype"):
             return self.model.get_dtype()
 
+    @property
+    def patches(self):
+        return self._compiled_patches
+
+    @patches.setter
+    def patches(self, patches):
+        self._set_patch_program(PatchProgram.from_weight_patches(patches))
+
+    def _set_patch_program(self, program):
+        self.patch_program = program
+        self._compiled_patches = program.weight_patches()
+
     def add_patches(self, patches, strength_patch=1.0, strength_model=1.0):
         with self.use_ejected():
             p = set()
             model_sd = self.model.state_dict()
+            program = self.patch_program
             for k in patches:
                 offset = None
                 function = None
@@ -857,11 +869,17 @@ class ModelPatcher:
 
                 if key in model_sd:
                     p.add(k)
-                    current_patches = self.patches.get(key, [])
-                    current_patches.append((strength_patch, patches[k], strength_model, offset, function))
-                    self.patches[key] = current_patches
+                    program = program.append_weight_delta(
+                        target=key,
+                        patch=patches[k],
+                        strength_patch=strength_patch,
+                        strength_model=strength_model,
+                        offset=offset,
+                        function=function,
+                    )
 
-            self.patches_uuid = uuid.uuid4()
+            self._set_patch_program(program)
+            self.patches_uuid = program.digest
             return list(p)
 
     def get_key_patches(self, filter_prefix=None):
