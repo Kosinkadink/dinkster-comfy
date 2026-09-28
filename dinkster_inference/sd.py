@@ -375,10 +375,6 @@ class CLIP:
                     if "end_percent" in add_dict:
                         if t_range[0] > add_dict["end_percent"]:
                             continue
-                    hooks_keyframes = scheduled_opts[1]
-                    for hook, keyframe in hooks_keyframes:
-                        hook.hook_keyframe._current_keyframe = keyframe
-                    # apply appropriate hooks with values that match new hook_keyframe
                     self.patcher.patch_hooks(all_hooks)
                     # perform encoding as normal
                     o = self.cond_stage_model.encode_token_weights(tokens)
