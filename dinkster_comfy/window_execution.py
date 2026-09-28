@@ -114,10 +114,11 @@ def gather_window_tensor(
 
 
 def _axis_positions(plan: CompositeWindowPlan, layout: WindowTensorLayout) -> dict[str, int]:
-    plan_axes = tuple(axis.name for axis in plan.axes)
     layout_axes = tuple(axis for axis, _ in layout.axis_dimensions)
-    if set(layout_axes) != set(plan_axes):
-        raise ValueError("output layout must map every semantic plan axis")
+    kind = next(kind for kind in plan.kinds if kind.name == layout.kind)
+    mapped_axes = tuple(mapping.axis for mapping in kind.axis_maps)
+    if set(layout_axes) != set(mapped_axes):
+        raise ValueError("output layout must map every non-invariant kind axis")
     occurrence_axes = tuple(axis for layer in plan.layers for axis in layer.axes)
     return {axis: occurrence_axes.index(axis) for axis in layout_axes}
 
@@ -196,16 +197,12 @@ def merge_window_tensors(
         ):
             raise ValueError(f"joint window {window.index} returned an incompatible tensor")
         local_entries = _kind_local_positions(plan, window, layout)
-        occurrence_by_positions = {
-            occurrence.local_positions: occurrence for occurrence in window.occurrences
-        }
-        occurrence_axes = tuple(axis for layer in plan.layers for axis in layer.axes)
         for local_positions in itertools.product(
             *(range(len(local_entries[axis])) for axis in dimension_by_axis)
         ):
             source = [slice(None)] * len(output_shape)
             target = [slice(None)] * len(output_shape)
-            primary_positions = [0] * len(occurrence_axes)
+            primary_positions = {}
             for (axis, dimension), local_position in zip(
                 dimension_by_axis.items(), local_positions, strict=True
             ):
@@ -213,10 +210,16 @@ def merge_window_tensors(
                 source[dimension] = local_position
                 target[dimension] = coordinate
                 primary_positions[occurrence_positions[axis]] = primary_position
-            occurrence = occurrence_by_positions[tuple(primary_positions)]
+            weight = sum(
+                occurrence.weight
+                for occurrence in window.occurrences
+                if all(
+                    occurrence.local_positions[position] == primary_position
+                    for position, primary_position in primary_positions.items()
+                )
+            )
             source_index = tuple(source)
             target_index = tuple(target)
-            weight = occurrence.weight
             accumulator[target_index].add_(output[source_index].to(accumulation_dtype) * weight)
             denominator[target_index].add_(weight)
     return (accumulator / denominator).to(first.dtype)

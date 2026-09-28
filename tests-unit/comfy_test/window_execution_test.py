@@ -237,3 +237,48 @@ def test_executor_maps_asymmetric_nested_video_and_audio_streams():
         result.unbind()[1],
         torch.tensor([[[[110.0, 120.0, 180.0, 240.0, 250.0]]]]),
     )
+
+
+def test_executor_merges_nested_streams_over_invariant_spatial_axes():
+    temporal = MediaAxis("temporal", 2)
+    height = MediaAxis("height", 2)
+    plan = compile_window_plan(
+        axes=(height, temporal),
+        kinds=(
+            WindowKind(
+                "audio",
+                (KindAxisMap("temporal", 2, IntegerAffineIndexMap(1)),),
+                ("height",),
+            ),
+            _kind("video", (height, temporal)),
+        ),
+        layers=(
+            _layer("temporal", ((0, 1),)),
+            _layer("height", ((0,), (1,))),
+        ),
+    )
+    executor = WindowPlanExecutor(
+        plan,
+        (
+            WindowTensorLayout("video", (("height", 2), ("temporal", 3))),
+            WindowTensorLayout("audio", (("temporal", 3),)),
+        ),
+    )
+    video = torch.zeros((1, 1, 2, 2))
+    audio = torch.zeros((1, 1, 1, 2))
+    latent = NestedTensor((video, audio))
+    calls = 0
+
+    def evaluate(model, conds, sub_x, timestep, options):
+        nonlocal calls
+        del model, conds, timestep, options
+        calls += 1
+        return [sub_x + 100.0 * calls]
+
+    result = executor.execute(evaluate, object(), [[]], latent, torch.tensor([1.0]), {})[0]
+
+    assert torch.equal(
+        result.unbind()[0],
+        torch.tensor([[[[100.0, 100.0], [200.0, 200.0]]]]),
+    )
+    assert torch.equal(result.unbind()[1], torch.tensor([[[[150.0, 150.0]]]]))
