@@ -11,8 +11,10 @@ from dinkster_comfy.context_windows import (
     get_matching_context_schedule,
     get_matching_fuse_method,
 )
+from dinkster_comfy.conds import CONDConstant
 from dinkster_comfy.contribution_gain import ContributionGain
 from dinkster_comfy.samplers import compile_window_masks, get_area_and_mult
+from dinkster_comfy import utils
 from dinkster_comfy.window_execution import (
     CompiledWindowField,
     WindowPlanExecutor,
@@ -296,6 +298,57 @@ def test_executor_maps_asymmetric_nested_video_and_audio_streams():
     assert torch.equal(result.unbind()[0], torch.tensor([[[101.0, 152.0, 203.0]]]))
     assert torch.equal(
         result.unbind()[1],
+        torch.tensor([[[[110.0, 120.0, 180.0, 240.0, 250.0]]]]),
+    )
+
+
+def test_executor_unpacks_windows_and_repacks_sampler_latents():
+    temporal = MediaAxis("temporal", 3)
+    plan = compile_window_plan(
+        axes=(temporal,),
+        kinds=(
+            WindowKind(
+                "audio",
+                (KindAxisMap("temporal", 5, ProportionalRangeIndexMap()),),
+            ),
+            _kind("video", (temporal,)),
+        ),
+        layers=(_layer("temporal", ((0, 1), (1, 2))),),
+    )
+    executor = WindowPlanExecutor(
+        plan,
+        (
+            WindowTensorLayout("video", (("temporal", 2),)),
+            WindowTensorLayout("audio", (("temporal", 3),)),
+        ),
+    )
+    video = torch.tensor([[[1.0, 2.0, 3.0]]])
+    audio = torch.tensor([[[[10.0, 20.0, 30.0, 40.0, 50.0]]]])
+    packed, shapes = utils.pack_latents((video, audio))
+
+    class Model:
+        latent_shapes = shapes
+
+    conds = [[{"model_conds": {"latent_shapes": CONDConstant(shapes)}}]]
+    seen_shapes = []
+
+    def evaluate(model, sub_conds, sub_x, timestep, options):
+        del model, timestep, options
+        sub_shapes = sub_conds[0][0]["model_conds"]["latent_shapes"].cond
+        seen_shapes.append(sub_shapes)
+        assert sub_x.shape == (1, 1, sum(torch.Size(shape[1:]).numel() for shape in sub_shapes))
+        return [sub_x + 100.0 * len(seen_shapes)]
+
+    result = executor.execute(evaluate, Model(), conds, packed, torch.tensor([1.0]), {})[0]
+    video_result, audio_result = utils.unpack_latents(result, shapes)
+
+    assert seen_shapes == [
+        [torch.Size((1, 1, 2)), torch.Size((1, 1, 1, 3))],
+        [torch.Size((1, 1, 2)), torch.Size((1, 1, 1, 3))],
+    ]
+    assert torch.equal(video_result, torch.tensor([[[101.0, 152.0, 203.0]]]))
+    assert torch.equal(
+        audio_result,
         torch.tensor([[[[110.0, 120.0, 180.0, 240.0, 250.0]]]]),
     )
 

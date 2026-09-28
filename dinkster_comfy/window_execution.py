@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import torch
 
 from .nested_tensor import NestedTensor
+from . import utils
 from .window_plan import (
     AccumulationDType,
     CompositeWindowPlan,
@@ -299,19 +300,48 @@ class WindowPlanExecutor:
             tuple(template.shape),
         )
 
+    @staticmethod
+    def _patch_latent_shapes(conds, shapes):
+        for conditioning in conds:
+            if conditioning is None:
+                continue
+            for metadata in conditioning:
+                model_conds = metadata.get("model_conds", {})
+                latent_shapes = model_conds.get("latent_shapes")
+                if latent_shapes is not None:
+                    model_conds["latent_shapes"] = latent_shapes._copy_with(shapes)
+
     def execute(self, evaluate, model, conds, x_in, timestep, model_options):
+        packed = type(x_in) is not NestedTensor and len(self.layouts) > 1
+        template = x_in
+        if packed:
+            if model.latent_shapes is None or len(model.latent_shapes) != len(self.layouts):
+                raise ValueError("packed latent shapes do not match the window declarations")
+            template = NestedTensor(tuple(utils.unpack_latents(x_in, model.latent_shapes)))
         outputs = [[] for _ in conds]
         for window in self.plan.joint_windows:
-            sub_x = self._gather_latent(x_in, window)
+            sub_x = self._gather_latent(template, window)
             sub_conds = gather_window_value(conds, window)
+            sub_shapes = None
+            if packed:
+                sub_x, sub_shapes = utils.pack_latents(sub_x.unbind())
+                self._patch_latent_shapes(sub_conds, sub_shapes)
             sub_options = model_options.copy()
             transformer_options = model_options.get("transformer_options", {}).copy()
             transformer_options["window_plan"] = self.plan
             transformer_options["window"] = window
             sub_options["transformer_options"] = transformer_options
             sub_outputs = evaluate(model, sub_conds, sub_x, timestep, sub_options)
+            if packed:
+                sub_outputs = [
+                    NestedTensor(tuple(utils.unpack_latents(output, sub_shapes)))
+                    for output in sub_outputs
+                ]
             if len(sub_outputs) != len(outputs):
                 raise ValueError("window evaluation returned the wrong conditioning count")
             for index, output in enumerate(sub_outputs):
                 outputs[index].append(output)
-        return [self._merge_latent(window_outputs, x_in) for window_outputs in outputs]
+        merged = [self._merge_latent(window_outputs, template) for window_outputs in outputs]
+        if packed:
+            return [utils.pack_latents(output.unbind())[0] for output in merged]
+        return merged

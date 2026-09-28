@@ -1015,9 +1015,12 @@ def ksampler(sampler_name, extra_options={}, inpaint_options={}):
 
 
 def process_conds(model, noise, conds, device, latent_image=None, denoise_mask=None, seed=None, latent_shapes=None):
+    mask_dimensions = noise.shape[2:]
+    if latent_shapes is not None and len(latent_shapes) > 1:
+        mask_dimensions = latent_shapes[0][2:]
     for k in conds:
         conds[k] = conds[k][:]
-        resolve_areas_and_cond_masks_multidim(conds[k], noise.shape[2:], device)
+        resolve_areas_and_cond_masks_multidim(conds[k], mask_dimensions, device)
 
     if hasattr(model, 'extra_conds'):
         for k in conds:
