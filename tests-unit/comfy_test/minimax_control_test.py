@@ -9,6 +9,7 @@ from dinkster_comfy.minimax_control import (
     MiniMaxH3FunControlPatch,
     _control_config,
     _video_window_layout,
+    load_minimax_h3_fun_control_patch,
 )
 from dinkster_comfy.window_execution import gather_window_tensor
 from dinkster_comfy.window_plan import (
@@ -64,6 +65,56 @@ def test_control_config_reads_union_v2_metadata_and_tensor_widths():
         "time_embed_dim": 8,
         "use_adaln_curves": True,
     }
+
+
+def test_control_loader_freezes_inference_parameters(monkeypatch):
+    class Control(torch.nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.empty(1))
+
+    monkeypatch.setattr(
+        "dinkster_comfy.minimax_control.utils.load_torch_file",
+        lambda *args, **kwargs: ({"weight": torch.ones(1)}, {}),
+    )
+    monkeypatch.setattr(
+        "dinkster_comfy.minimax_control.is_minimax_h3_fun_state_dict",
+        lambda state_dict: True,
+    )
+    monkeypatch.setattr(
+        "dinkster_comfy.minimax_control._control_config", lambda *args: {}
+    )
+    monkeypatch.setattr(
+        "dinkster_comfy.minimax_control.utils.detect_layer_quantization",
+        lambda *args: None,
+    )
+    monkeypatch.setattr(
+        "dinkster_comfy.minimax_control.utils.weight_dtype", lambda state_dict: None
+    )
+    monkeypatch.setattr(
+        "dinkster_comfy.minimax_control.model_management.get_torch_device",
+        lambda: torch.device("cpu"),
+    )
+    monkeypatch.setattr(
+        "dinkster_comfy.minimax_control.model_management.unet_offload_device",
+        lambda: torch.device("cpu"),
+    )
+    monkeypatch.setattr(
+        "dinkster_comfy.minimax_control.model_management.unet_dtype",
+        lambda **kwargs: torch.float32,
+    )
+    monkeypatch.setattr(
+        "dinkster_comfy.minimax_control.model_management.unet_manual_cast",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "dinkster_comfy.minimax_control.ops.pick_operations", lambda *args: object()
+    )
+    monkeypatch.setattr("dinkster_comfy.minimax_control.MiniMaxH3FunControl", Control)
+
+    patcher = load_minimax_h3_fun_control_patch("control.safetensors")
+
+    assert all(not parameter.requires_grad for parameter in patcher.model.parameters())
 
 
 def test_control_latent_encodes_full_domain_once_and_gathers_each_joint_window(monkeypatch):
