@@ -1069,10 +1069,14 @@ def realize_contribution_gains(model, conds, sigmas):
             effect_masks = metadata.pop("effect_masks", ())
             if effect_masks:
                 gain = gain.with_effect_masks(effect_masks)
-            metadata["guidance_lane"] = lane
-            metadata["realized_contribution_gain"] = gain.realize(
+            realized_gain = gain.realize(
                 sigmas, model.model_sampling.percent_to_sigma
             )
+            metadata["realized_contribution_gain"] = realized_gain
+            if realized_gain.lane_gains:
+                metadata["guidance_lane"] = lane
+            else:
+                metadata.pop("guidance_lane", None)
             control = metadata.get("control")
             if control is not None and id(control) not in controls:
                 control.realize_gain(sigmas, model)

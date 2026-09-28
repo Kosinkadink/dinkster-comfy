@@ -114,9 +114,36 @@ def test_conditioning_legacy_strength_and_range_compile_to_one_gain_table():
     assert "strength" not in metadata
     assert "start_percent" not in metadata
     assert "end_percent" not in metadata
+    assert "guidance_lane" not in metadata
     table = metadata["realized_contribution_gain"]
     assert table.timeline_gains == (0.0, 1.0, 1.0, 1.0)
     assert table.scalar_gain(5.0, lane="positive") == 0.5
+
+
+def test_conditioning_lane_is_recorded_only_when_it_changes_gain():
+    model = type(
+        "Model",
+        (),
+        {
+            "model_sampling": type(
+                "Sampling", (), {"percent_to_sigma": lambda self, value: 1.0 - value}
+            )()
+        },
+    )()
+    metadata = {
+        "contribution_gain": ContributionGain(lane_gains=(("positive", 0.5),))
+    }
+
+    realize_contribution_gains(
+        model,
+        {"positive": [metadata]},
+        torch.tensor([1.0, 0.0]),
+    )
+
+    assert metadata["guidance_lane"] == "positive"
+    assert metadata["realized_contribution_gain"].scalar_gain(
+        1.0, lane=metadata["guidance_lane"]
+    ) == 0.5
 
 
 def test_control_residual_uses_realized_global_site_lane_and_mask_gain():
