@@ -338,6 +338,10 @@ class WindowPlanExecutor:
             raise ValueError("ordinary latent tensors require exactly one declaration")
         return gather_window_tensor(value, self.layouts[0], window)
 
+    def window_latent(self, index, template):
+        """Gather the latent shape produced by one joint window."""
+        return self._gather_latent(template, self.plan.joint_windows[index])
+
     def _merge_latent(self, outputs, template):
         if type(template) is NestedTensor:
             streams = tuple(output.unbind() for output in outputs)
@@ -377,7 +381,7 @@ class WindowPlanExecutor:
     ):
         """Evaluate one joint window for a serial or distributed plan executor."""
         window = self.plan.joint_windows[index]
-        sub_x = self._gather_latent(template, window)
+        sub_x = self.window_latent(index, template)
         sub_shapes = None
         if packed:
             sub_x, sub_shapes = utils.pack_latents(sub_x.unbind())
