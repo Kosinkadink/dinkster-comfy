@@ -2,11 +2,11 @@ import logging
 
 import pytest
 
-from dinkster_comfy.cli_args import args
+from dinkster_inference.cli_args import args
 
 args.cpu = True
 
-from dinkster_comfy.ldm.modules import attention
+from dinkster_inference.ldm.modules import attention
 
 
 def test_attention_registries_are_independently_owned():

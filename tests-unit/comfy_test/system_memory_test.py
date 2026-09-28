@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import dinkster_comfy.system_memory as system_memory
+import dinkster_inference.system_memory as system_memory
 
 GIB = 1024 ** 3
 HOST_TOTAL = 128 * GIB

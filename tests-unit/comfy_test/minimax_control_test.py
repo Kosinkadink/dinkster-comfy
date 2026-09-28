@@ -1,18 +1,18 @@
 import torch
 
-from dinkster_comfy.cli_args import args
+from dinkster_inference.cli_args import args
 
 args.cpu = True
 
-from dinkster_comfy.minimax_control import (
+from dinkster_inference.minimax_control import (
     MiniMaxH3FunControlBlockPatch,
     MiniMaxH3FunControlPatch,
     _control_config,
     _video_window_layout,
     load_minimax_h3_fun_control_patch,
 )
-from dinkster_comfy.window_execution import gather_window_tensor
-from dinkster_comfy.window_plan import (
+from dinkster_inference.window_execution import gather_window_tensor
+from dinkster_inference.window_plan import (
     IntegerAffineIndexMap,
     KindAxisMap,
     LayerWindow,
@@ -74,43 +74,43 @@ def test_control_loader_freezes_inference_parameters(monkeypatch):
             self.weight = torch.nn.Parameter(torch.empty(1))
 
     monkeypatch.setattr(
-        "dinkster_comfy.minimax_control.utils.load_torch_file",
+        "dinkster_inference.minimax_control.utils.load_torch_file",
         lambda *args, **kwargs: ({"weight": torch.ones(1)}, {}),
     )
     monkeypatch.setattr(
-        "dinkster_comfy.minimax_control.is_minimax_h3_fun_state_dict",
+        "dinkster_inference.minimax_control.is_minimax_h3_fun_state_dict",
         lambda state_dict: True,
     )
     monkeypatch.setattr(
-        "dinkster_comfy.minimax_control._control_config", lambda *args: {}
+        "dinkster_inference.minimax_control._control_config", lambda *args: {}
     )
     monkeypatch.setattr(
-        "dinkster_comfy.minimax_control.utils.detect_layer_quantization",
+        "dinkster_inference.minimax_control.utils.detect_layer_quantization",
         lambda *args: None,
     )
     monkeypatch.setattr(
-        "dinkster_comfy.minimax_control.utils.weight_dtype", lambda state_dict: None
+        "dinkster_inference.minimax_control.utils.weight_dtype", lambda state_dict: None
     )
     monkeypatch.setattr(
-        "dinkster_comfy.minimax_control.model_management.get_torch_device",
+        "dinkster_inference.minimax_control.model_management.get_torch_device",
         lambda: torch.device("cpu"),
     )
     monkeypatch.setattr(
-        "dinkster_comfy.minimax_control.model_management.unet_offload_device",
+        "dinkster_inference.minimax_control.model_management.unet_offload_device",
         lambda: torch.device("cpu"),
     )
     monkeypatch.setattr(
-        "dinkster_comfy.minimax_control.model_management.unet_dtype",
+        "dinkster_inference.minimax_control.model_management.unet_dtype",
         lambda **kwargs: torch.float32,
     )
     monkeypatch.setattr(
-        "dinkster_comfy.minimax_control.model_management.unet_manual_cast",
+        "dinkster_inference.minimax_control.model_management.unet_manual_cast",
         lambda *args, **kwargs: None,
     )
     monkeypatch.setattr(
-        "dinkster_comfy.minimax_control.ops.pick_operations", lambda *args: object()
+        "dinkster_inference.minimax_control.ops.pick_operations", lambda *args: object()
     )
-    monkeypatch.setattr("dinkster_comfy.minimax_control.MiniMaxH3FunControl", Control)
+    monkeypatch.setattr("dinkster_inference.minimax_control.MiniMaxH3FunControl", Control)
 
     patcher = load_minimax_h3_fun_control_patch("control.safetensors")
 
@@ -163,8 +163,8 @@ def test_control_latent_encodes_full_domain_once_and_gathers_each_joint_window(m
     class ModelPatch:
         model = Control()
 
-    monkeypatch.setattr("dinkster_comfy.minimax_control.model_management.loaded_models", lambda **kwargs: [])
-    monkeypatch.setattr("dinkster_comfy.minimax_control.model_management.load_models_gpu", lambda models: None)
+    monkeypatch.setattr("dinkster_inference.minimax_control.model_management.loaded_models", lambda **kwargs: [])
+    monkeypatch.setattr("dinkster_inference.minimax_control.model_management.load_models_gpu", lambda models: None)
     vae = VAE()
     mask = torch.tensor(
         [

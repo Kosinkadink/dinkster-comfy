@@ -3,12 +3,12 @@
 import pytest
 import torch
 
-from dinkster_comfy.cli_args import args
+from dinkster_inference.cli_args import args
 
 if not torch.cuda.is_available():
     args.cpu = True
 
-import dinkster_comfy.text_encoders.gemma4 as gemma4  # noqa: E402
+import dinkster_inference.text_encoders.gemma4 as gemma4  # noqa: E402
 
 PROMPT = "describe a cute anime girl with fennec ears"
 THOUGHT_BLOCK = "<|channel>thought\n<channel|>"

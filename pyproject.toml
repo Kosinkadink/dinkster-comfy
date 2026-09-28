@@ -3,7 +3,7 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dinkster-comfy"
+name = "dinkster-inference"
 version = "0.1.0"
 description = "Dinkster-owned inference library forked from ComfyUI"
 readme = "README.md"
@@ -42,13 +42,13 @@ dependencies = [
 ]
 
 [project.urls]
-repository = "https://github.com/Kosinkadink/dinkster-comfy"
+repository = "https://github.com/Kosinkadink/dinkster-inference"
 
 [tool.setuptools.packages.find]
-include = ["dinkster_comfy*"]
+include = ["dinkster_inference*"]
 
 [tool.setuptools.package-data]
-dinkster_comfy = ["**/*.json", "**/*.model", "**/*.txt"]
+dinkster_inference = ["**/*.json", "**/*.model", "**/*.txt"]
 
 [tool.ruff]
 lint.select = [

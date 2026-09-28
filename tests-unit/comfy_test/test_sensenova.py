@@ -2,26 +2,26 @@ from types import SimpleNamespace
 
 import torch
 
-from dinkster_comfy.cli_args import args
+from dinkster_inference.cli_args import args
 
 args.cpu = True
 
-from dinkster_comfy import model_base, model_detection
-from dinkster_comfy.ldm.sensenova import model as sensenova_model
-from dinkster_comfy.ldm.sensenova.conditioning import (
+from dinkster_inference import model_base, model_detection
+from dinkster_inference.ldm.sensenova import model as sensenova_model
+from dinkster_inference.ldm.sensenova.conditioning import (
     block_causal_mask,
     condition_input_ids,
     conditioned_input_length,
     preprocess_references,
     thw_indexes,
 )
-from dinkster_comfy.ldm.sensenova.model import _match_prefix_batch, _pad_to_merged_patch_size
-from dinkster_comfy.ldm.sensenova.sampling import (
+from dinkster_inference.ldm.sensenova.model import _match_prefix_batch, _pad_to_merged_patch_size
+from dinkster_inference.ldm.sensenova.sampling import (
     SenseNovaModelSampling,
     resolution_noise_scale,
     upstream_sigmas,
 )
-from dinkster_comfy.text_encoders.sensenova import SenseNovaTokenizer
+from dinkster_inference.text_encoders.sensenova import SenseNovaTokenizer
 
 
 def _minimal_state_dict():
