@@ -5,6 +5,7 @@ from dinkster_comfy.cli_args import args
 args.cpu = True
 
 from dinkster_comfy.minimax_control import (
+    MiniMaxH3FunControlBlockPatch,
     MiniMaxH3FunControlPatch,
     _control_config,
     _video_window_layout,
@@ -90,6 +91,12 @@ def test_control_latent_encodes_full_domain_once_and_gathers_each_joint_window(m
     class VAE:
         encode_calls = 0
 
+        class Patcher:
+            def patch_program_descriptor(self):
+                return {"vae": "test"}
+
+        patcher = Patcher()
+
         def spacial_compression_encode(self):
             return 1
 
@@ -165,3 +172,35 @@ def test_control_latent_encodes_full_domain_once_and_gathers_each_joint_window(m
             actual,
             gather_window_tensor(patch.control_latent, layout, window),
         )
+
+
+def test_control_block_patch_has_bounded_content_descriptor():
+    class Descriptor:
+        def patch_program_descriptor(self):
+            return {"model": "test"}
+
+    class VAE:
+        patcher = Descriptor()
+
+    control = MiniMaxH3FunControlPatch(
+        Descriptor(),
+        VAE(),
+        torch.zeros((1, 3, 2, 2)),
+        torch.zeros((1, 2, 2)),
+        torch.ones((1, 3, 2, 2)),
+        0.75,
+        1.0,
+        0.0,
+    )
+    block = MiniMaxH3FunControlBlockPatch(control, 10, None)
+
+    first = block.patch_program_descriptor()
+    second = block.patch_program_descriptor()
+
+    assert first == second
+    assert first["control"]["model_patch"] == {"model": "test"}
+    assert first["control"]["vae"] == {"model": "test"}
+    assert len(first["control"]["control_video"]) == 64
+    assert len(first["control"]["mask"]) == 64
+    assert len(first["control"]["source_video"]) == 64
+    assert "control_latent" not in first["control"]

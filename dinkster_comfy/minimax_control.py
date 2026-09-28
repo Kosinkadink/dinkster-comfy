@@ -11,6 +11,7 @@ from . import model_management, ops, patcher_extension, utils
 from .ldm.minimax.controlnet import MiniMaxH3FunControl, is_minimax_h3_fun_state_dict
 from .ldm.minimax.vae import IMAGENET_MEAN
 from .model_patcher import CoreModelPatcher
+from .patch_program import PatchResource
 from .window_execution import WindowTensorLayout, gather_window_tensor
 from .window_plan import CompositeWindowPlan, JointWindow
 
@@ -114,6 +115,22 @@ class MiniMaxH3FunControlPatch:
         self.window_control_latent = None
         self.control_stream = None
         self.active = False
+        self._program_descriptor = None
+
+    def patch_program_descriptor(self):
+        if self._program_descriptor is None:
+            self._program_descriptor = {
+                "type": f"{type(self).__module__}.{type(self).__qualname__}",
+                "model_patch": self.model_patch.patch_program_descriptor(),
+                "vae": self.vae.patcher.patch_program_descriptor(),
+                "control_video": None if self.control_video is None else PatchResource.bind(self.control_video).identity,
+                "mask": None if self.mask is None else PatchResource.bind(self.mask).identity,
+                "source_video": None if self.source_video is None else PatchResource.bind(self.source_video).identity,
+                "strength": self.strength,
+                "sigma_start": self.sigma_start,
+                "sigma_end": self.sigma_end,
+            }
+        return self._program_descriptor
 
     def _fit_frames(self, frames, frame_count, width, height):
         indices = torch.arange(frame_count, device=frames.device).clamp(max=frames.shape[0] - 1)
@@ -267,6 +284,14 @@ class MiniMaxH3FunControlBlockPatch:
         self.control_patch = control_patch
         self.block_index = block_index
         self.previous = previous
+
+    def patch_program_descriptor(self):
+        return {
+            "type": f"{type(self).__module__}.{type(self).__qualname__}",
+            "control": self.control_patch.patch_program_descriptor(),
+            "block_index": self.block_index,
+            "previous": self.previous,
+        }
 
     def __call__(self, args, extra_args):
         self.control_patch.before_block(self.block_index, args)
