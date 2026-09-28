@@ -24,6 +24,7 @@ import logging
 import math
 import time
 import uuid
+import weakref
 from types import MappingProxyType
 from typing import Callable, Optional
 
@@ -39,10 +40,16 @@ import dinkster_comfy.patcher_extension
 import dinkster_comfy.utils
 import comfy_aimdo.host_buffer
 from dinkster_comfy.comfy_types import UnetWrapperFunction
+from dinkster_comfy.contribution_gain import ContributionGain
 from dinkster_comfy.internal_logging import detail
 from dinkster_comfy.patch_program import ModuleInsertionEntry, PatchProgram
 from dinkster_comfy.quant_ops import QuantizedTensor
 from dinkster_comfy.patcher_extension import CallbacksMP, PatcherInjection, WrappersMP
+from dinkster_comfy.weight_adapter.base import WeightAdapterBase, WeightAdapterTrainBase
+from dinkster_comfy.weight_adapter.bypass import (
+    ScheduledBypassAdapter,
+    ScheduledBypassMaterializer,
+)
 
 import comfy_aimdo.model_vbar
 
@@ -206,6 +213,43 @@ class LowVramPatch:
             self.validate(self.key)
         patches = self.prepared_patches if self.prepared_patches is not None else self.patches[self.key]
         return dinkster_comfy.lora.calculate_weight(patches, weight, self.key, intermediate_dtype=weight.dtype)
+
+
+class HookWeightPatch:
+    def __init__(self, patcher, key):
+        self.model = weakref.ref(patcher.model)
+        self.fallback_patcher = weakref.ref(patcher)
+        self.key = key
+
+    def __call__(self, weight):
+        model = self.model()
+        patcher = getattr(model, "current_patcher", None)
+        if patcher is None:
+            patcher = self.fallback_patcher()
+        if patcher is None or patcher.current_hooks is None:
+            return weight
+        patches = patcher.get_combined_hook_patches(patcher.current_hooks).get(self.key)
+        if not patches:
+            return weight
+        output_dtype = weight.dtype
+        intermediate_dtype = torch.float32
+        weight = dinkster_comfy.model_management.cast_to_device(
+            weight,
+            weight.device,
+            intermediate_dtype,
+            copy=True,
+        )
+        weight = dinkster_comfy.lora.calculate_weight(
+            patches,
+            weight,
+            self.key,
+            intermediate_dtype=intermediate_dtype,
+        )
+        return dinkster_comfy.float.stochastic_rounding(
+            weight,
+            output_dtype,
+            seed=dinkster_comfy.utils.string_to_seed(self.key),
+        )
 
 LOWVRAM_PATCH_ESTIMATE_MATH_FACTOR = 2
 
@@ -376,6 +420,9 @@ class ModelPatcher:
         self.register_patch_materializer(
             "dinkster.patcher_injection", _PatcherInjectionMaterializer()
         )
+        self.register_patch_materializer(
+            "dinkster.scheduled_bypass", ScheduledBypassMaterializer()
+        )
         self._materialized_insertions = []
         self._patch_scratch = {}
         self.backup = {}
@@ -401,7 +448,9 @@ class ModelPatcher:
         self.hook_patches_backup: dict[dinkster_comfy.hooks._HookRef] = None
         self.hook_backup: dict[str, tuple[torch.Tensor, torch.device]] = {}
         self.cached_hook_patches: dict[dinkster_comfy.hooks.HookGroup, dict[str, torch.Tensor]] = {}
+        self.hook_weight_function_keys = set()
         self.current_hooks: Optional[dinkster_comfy.hooks.HookGroup] = None
+        self.current_transformer_options = None
         self.forced_hooks: Optional[dinkster_comfy.hooks.HookGroup] = None  # NOTE: only used for CLIP at this time
         self.is_clip = False
         self.hook_mode = dinkster_comfy.hooks.EnumHookMode.MaxSpeed
@@ -638,6 +687,8 @@ class ModelPatcher:
         if self.forced_hooks != clone.forced_hooks:
             return False
         if self.hook_patches.keys() != clone.hook_patches.keys():
+            return False
+        if self.patch_program.digest != clone.patch_program.digest:
             return False
         if self.attachments.keys() != clone.attachments.keys():
             return False
@@ -1113,11 +1164,13 @@ class ModelPatcher:
         self._validate_patch_program()
         with self.use_ejected():
             self.unpatch_hooks()
+            self._refresh_hook_weight_function_keys()
             mem_counter = 0
             patch_counter = 0
             lowvram_counter = 0
             lowvram_mem_counter = 0
             loading = self._load_list()
+            hook_patch_keys = self.get_hook_patch_keys()
 
             load_completely = []
             offloaded = []
@@ -1184,8 +1237,20 @@ class ModelPatcher:
                 if weight_key in self.weight_wrapper_patches:
                     m.weight_function.extend(self.weight_wrapper_patches[weight_key])
 
+                if (
+                    weight_key in hook_patch_keys
+                    and hasattr(m, "weight_function")
+                    and not isinstance(m.weight, QuantizedTensor)
+                ):
+                    m.weight_function.append(HookWeightPatch(self, weight_key))
+                    self.hook_weight_function_keys.add(weight_key)
+
                 if bias_key in self.weight_wrapper_patches:
                     m.bias_function.extend(self.weight_wrapper_patches[bias_key])
+
+                if bias_key in hook_patch_keys and hasattr(m, "bias_function"):
+                    m.bias_function.append(HookWeightPatch(self, bias_key))
+                    self.hook_weight_function_keys.add(bias_key)
 
                 mem_counter += move_weight_functions(m, device_to)
 
@@ -1523,6 +1588,31 @@ class ModelPatcher:
             return None
         return [entry.resources.value for entry in entries]
 
+    def set_bypass_adapters(self, key, adapters):
+        namespace = f"bypass:{key}"
+        entries = tuple(
+            ModuleInsertionEntry.create(
+                namespace=namespace,
+                site="model.root",
+                recipe="dinkster.scheduled_bypass",
+                resources=ScheduledBypassAdapter.create(
+                    target,
+                    adapter,
+                    strength,
+                    ContributionGain(),
+                    None,
+                ),
+                order=order,
+            )
+            for order, (target, (adapter, strength)) in enumerate(
+                sorted(adapters.items())
+            )
+        )
+        self.set_module_insertions(namespace, entries)
+
+    def remove_bypass_adapters(self, key):
+        self.set_module_insertions(f"bypass:{key}", ())
+
     def set_additional_models(self, key: str, models: list['ModelPatcher']):
         namespace = f"additional:{key}"
         entries = tuple(
@@ -1530,7 +1620,7 @@ class ModelPatcher:
                 namespace=namespace,
                 site="model.root",
                 recipe="dinkster.additional_model",
-                resources=model,
+                resources=model.clone(),
                 order=order,
                 activation=0.0,
                 clone_policy="copy",
@@ -1617,17 +1707,23 @@ class ModelPatcher:
         if self.hook_patches_backup is not None:
             self.hook_patches = self.hook_patches_backup
             self.hook_patches_backup = None
+            self._refresh_hook_weight_function_keys()
+            namespaces = {
+                entry.namespace
+                for entry in self.patch_program.module_insertions()
+                if entry.namespace.startswith("scheduled-bypass:")
+            }
+            for namespace in namespaces:
+                self.set_module_insertions(namespace, ())
 
     def set_hook_mode(self, hook_mode: dinkster_comfy.hooks.EnumHookMode):
         self.hook_mode = hook_mode
 
     def prepare_hook_patches_current_keyframe(self, t: torch.Tensor, hook_group: dinkster_comfy.hooks.HookGroup, model_options: dict[str]):
-        curr_t = t[0]
         reset_current_hooks = False
         multigpu_kf_changed_cache = None
-        transformer_options = model_options.get("transformer_options", {})
         for hook in hook_group.hooks:
-            changed = hook.hook_keyframe.prepare_current_keyframe(curr_t=curr_t, transformer_options=transformer_options)
+            changed = hook.prepare_current_gain(t)
             # if keyframe changed, remove any cached HookGroups that contain hook with the same hook_ref;
             # this will cause the weights to be recalculated when sampling
             if changed:
@@ -1697,6 +1793,8 @@ class ModelPatcher:
             current_hook_patches: dict[str,list] = self.hook_patches.get(hook.hook_ref, {})
             p = set()
             model_sd = self.model.state_dict()
+            bypass_entries = []
+            bypass_namespace = f"scheduled-bypass:{len(self.hook_patches)}"
             for k in patches:
                 offset = None
                 function = None
@@ -1710,10 +1808,45 @@ class ModelPatcher:
 
                 if key in model_sd:
                     p.add(k)
+                    patch = patches[k]
+                    requires_output_gain = bool(
+                        hook.contribution_gain.lane_gains
+                        or hook.contribution_gain.effect_masks
+                    )
+                    if (
+                        (
+                            isinstance(model_sd[key], QuantizedTensor)
+                            or requires_output_gain
+                        )
+                        and isinstance(patch, (WeightAdapterBase, WeightAdapterTrainBase))
+                    ):
+                        resource = ScheduledBypassAdapter.create(
+                            key,
+                            patch,
+                            strength_patch,
+                            hook.contribution_gain.with_timeline(
+                                hook.hook_keyframe.contribution_gain.timeline
+                            ),
+                            hook.hook_ref,
+                        )
+                        bypass_entries.append(
+                            ModuleInsertionEntry.create(
+                                namespace=bypass_namespace,
+                                site="model.root",
+                                recipe="dinkster.scheduled_bypass",
+                                resources=resource,
+                                order=len(bypass_entries),
+                                clone_policy="copy",
+                            )
+                        )
+                        continue
                     current_patches: list[tuple] = current_hook_patches.get(key, [])
                     current_patches.append((strength_patch, patches[k], strength_model, offset, function))
                     current_hook_patches[key] = current_patches
             self.hook_patches[hook.hook_ref] = current_hook_patches
+            self._refresh_hook_weight_function_keys()
+            if bypass_entries:
+                self.set_module_insertions(bypass_namespace, bypass_entries)
             # since should care about these patches too to determine if same model, reroll patches_uuid
             self.patches_uuid = uuid.uuid4()
             return list(p)
@@ -1726,16 +1859,40 @@ class ModelPatcher:
                 hook_patches: dict = self.hook_patches.get(hook.hook_ref, {})
                 for key in hook_patches.keys():
                     current_patches: list[tuple] = combined_patches.get(key, [])
-                    if math.isclose(hook.strength, 1.0):
+                    gain = hook.gain_for(site=key)
+                    if math.isclose(gain, 1.0):
                         current_patches.extend(hook_patches[key])
                     else:
                         # patches are stored as tuples: (strength_patch, (tuple_with_weights,), strength_model)
                         for patch in hook_patches[key]:
                             new_patch = list(patch)
-                            new_patch[0] *= hook.strength
+                            new_patch[0] *= gain
                             current_patches.append(tuple(new_patch))
                     combined_patches[key] = current_patches
         return combined_patches
+
+    def get_hook_patch_keys(self):
+        return {
+            key
+            for patches in self.hook_patches.values()
+            for key in patches
+        }
+
+    def _refresh_hook_weight_function_keys(self):
+        keys = set()
+        for key in self.get_hook_patch_keys():
+            module_key, separator, parameter = key.rpartition(".")
+            if not separator:
+                module_key = ""
+            if parameter not in ("weight", "bias"):
+                continue
+            module = self.model if not module_key else self.model.get_submodule(module_key)
+            if (
+                hasattr(module, f"{parameter}_function")
+                and not isinstance(getattr(module, parameter), QuantizedTensor)
+            ):
+                keys.add(key)
+        self.hook_weight_function_keys = keys
 
     def apply_hooks(self, hooks: dinkster_comfy.hooks.HookGroup, transformer_options: dict=None, force_apply=False):
         # TODO: return transformer_options dict with any additions from hooks
@@ -1768,7 +1925,11 @@ class ModelPatcher:
                     self.unpatch_hooks(model_sd_keys_set)
                 else:
                     self.unpatch_hooks()
-                    relevant_patches = self.get_combined_hook_patches(hooks=hooks)
+                    relevant_patches = {
+                        key: patches
+                        for key, patches in self.get_combined_hook_patches(hooks=hooks).items()
+                        if key not in self.hook_weight_function_keys
+                    }
                     original_weights = None
                     if len(relevant_patches) > 0:
                         original_weights = self.get_key_patches()
@@ -2251,7 +2412,7 @@ class ModelPatcherDynamic(ModelPatcher):
                     dinkster_comfy.model_management.discard_cuda_async_error()
                     continue
                 module_pin["registered"] = False
-                dinkster_comfy.model_management.TOTAL_PINNED_MEMORY = max(0, dinkster_comfy.model_management.TOTAL_PINNED_MEMORY - size)
+                dinkster_comfy.model_management.get_model_manager().release_pinned_memory(size)
                 pinned_size[0] = max(0, pinned_size[0] - size)
                 freed += size
                 ram_to_unload -= size
@@ -2276,7 +2437,7 @@ class ModelPatcherDynamic(ModelPatcher):
                 hostbuf.truncate(offset, do_unregister=registered)
                 stack_split[0] = min(stack_split[0], len(stack) - 1)
                 if registered:
-                    dinkster_comfy.model_management.TOTAL_PINNED_MEMORY = max(0, dinkster_comfy.model_management.TOTAL_PINNED_MEMORY - size)
+                    dinkster_comfy.model_management.get_model_manager().release_pinned_memory(size)
                     pinned_size[0] = max(0, pinned_size[0] - size)
                 freed += size
                 ram_to_unload -= size

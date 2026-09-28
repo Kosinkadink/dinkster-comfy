@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 import dinkster_comfy.lora
 import dinkster_comfy.model_management
 import dinkster_comfy.patcher_extension
+from dinkster_comfy.contribution_gain import ContributionGain, GainKeyframe, GainTimeline
 
 
 def conditioning_set_values(conditioning, values={}, append=False):
@@ -100,7 +101,11 @@ class Hook:
         self.hook_id = hook_id
         '''Optional string ID to identify hook; useful if need to consolidate duplicates at registration time.'''
         self.hook_keyframe = hook_keyframe if hook_keyframe else HookKeyframeGroup()
-        '''Keyframe storage that can be referenced to get strength for current sampling step.'''
+        '''Gain declaration used to realize strength against the executed timeline.'''
+        self.contribution_gain = ContributionGain()
+        self.realized_gain = None
+        self.current_gain = 1.0
+        self.current_timestep = None
         self.hook_scope = hook_scope
         '''Scope of where this hook should apply in terms of the conds used in sampling run.'''
         self.custom_should_register = default_should_register
@@ -108,14 +113,52 @@ class Hook:
 
     @property
     def strength(self):
-        return self.hook_keyframe.strength
+        return self.current_gain
 
     def initialize_timesteps(self, model: BaseModel):
         self.reset()
-        self.hook_keyframe.initialize_timesteps(model)
+
+    def realize_gain(self, sigmas: torch.Tensor, model: BaseModel):
+        gain = self.contribution_gain.with_timeline(
+            self.hook_keyframe.contribution_gain.timeline
+        )
+        self.realized_gain = gain.realize(sigmas, model.model_sampling.percent_to_sigma)
+        self.current_timestep = self.realized_gain.sigmas[0]
+        self.current_gain = self.realized_gain.scalar_gain(self.current_timestep)
+
+    def prepare_current_gain(self, timestep: torch.Tensor) -> bool:
+        if self.realized_gain is None:
+            return False
+        self.current_timestep = timestep
+        gain = self.realized_gain.scalar_gain(timestep)
+        changed = not math.isclose(gain, self.current_gain)
+        self.current_gain = gain
+        return changed
+
+    def gain_for(self, *, site: str | None = None, lane: str | None = None) -> float:
+        if self.realized_gain is None or self.current_timestep is None:
+            return self.current_gain
+        return self.realized_gain.scalar_gain(
+            self.current_timestep,
+            site=site,
+            lane=lane,
+        )
+
+    def tensor_gain_for(self, output, *, site=None, transformer_options=None):
+        if self.realized_gain is None or self.current_timestep is None:
+            return self.current_gain
+        options = transformer_options or {}
+        return self.realized_gain.tensor_gain(
+            self.current_timestep,
+            output,
+            site=site,
+            lanes=options.get("cond_or_uncond", ()),
+        )
 
     def reset(self):
-        self.hook_keyframe.reset()
+        self.realized_gain = None
+        self.current_gain = 1.0
+        self.current_timestep = None
 
     def clone(self):
         c: Hook = self.__class__()
@@ -123,6 +166,10 @@ class Hook:
         c.hook_ref = self.hook_ref
         c.hook_id = self.hook_id
         c.hook_keyframe = self.hook_keyframe
+        c.contribution_gain = self.contribution_gain
+        c.realized_gain = self.realized_gain
+        c.current_gain = self.current_gain
+        c.current_timestep = self.current_timestep
         c.hook_scope = self.hook_scope
         c.custom_should_register = self.custom_should_register
         return c
@@ -260,20 +307,78 @@ class TransformerOptionsHook(Hook):
             return False
         # NOTE: to_load_options will be used to manually load patches/wrappers/callbacks from hooks
         self._skip_adding = False
+        transformers_dict = _gain_scaled_attention_patches(self, self.transformers_dict)
         if self.hook_scope == EnumHookScope.AllConditioning:
-            add_model_options = {"transformer_options": self.transformers_dict,
-                                 "to_load_options": self.transformers_dict}
+            add_model_options = {"transformer_options": transformers_dict,
+                                 "to_load_options": transformers_dict}
             # skip_adding if included in AllConditioning to avoid double loading
             self._skip_adding = True
         else:
-            add_model_options = {"to_load_options": self.transformers_dict}
+            add_model_options = {"to_load_options": transformers_dict}
         registered.add(self)
         dinkster_comfy.patcher_extension.merge_nested_dicts(model_options, add_model_options, copy_dict1=False)
         return True
 
     def on_apply_hooks(self, model: ModelPatcher, transformer_options: dict[str]):
         if not self._skip_adding:
-            dinkster_comfy.patcher_extension.merge_nested_dicts(transformer_options, self.transformers_dict, copy_dict1=False)
+            dinkster_comfy.patcher_extension.merge_nested_dicts(
+                transformer_options,
+                _gain_scaled_attention_patches(self, self.transformers_dict),
+                copy_dict1=False,
+            )
+
+
+class _ContributionGainAttentionPatch:
+    def __init__(self, hook, site, patch):
+        self.hook = hook
+        self.site = site
+        self.patch = patch
+
+    def __call__(self, *args, **kwargs):
+        result = self.patch(*args, **kwargs)
+        options = args[-1] if args and isinstance(args[-1], dict) else {}
+        if isinstance(result, tuple):
+            return tuple(
+                original
+                + (patched - original)
+                * self.hook.tensor_gain_for(
+                    patched,
+                    site=self.site,
+                    transformer_options=options,
+                )
+                if isinstance(original, torch.Tensor) and isinstance(patched, torch.Tensor)
+                else patched
+                for original, patched in zip(args, result)
+            )
+        if isinstance(result, torch.Tensor) and args and isinstance(args[0], torch.Tensor):
+            gain = self.hook.tensor_gain_for(
+                result,
+                site=self.site,
+                transformer_options=options,
+            )
+            return args[0] + (result - args[0]) * gain
+        return result
+
+
+def _gain_scaled_attention_patches(hook, transformers_dict):
+    if not transformers_dict or "patches" not in transformers_dict:
+        return transformers_dict
+    attention_sites = {
+        "attn1_patch",
+        "attn2_patch",
+        "attn1_output_patch",
+        "attn2_output_patch",
+    }
+    patches = transformers_dict["patches"]
+    scaled = {
+        site: [
+            _ContributionGainAttentionPatch(hook, site, patch) for patch in values
+        ]
+        if site in attention_sites
+        else values
+        for site, values in patches.items()
+    }
+    return {**transformers_dict, "patches": scaled}
 
 WrapperHook = TransformerOptionsHook
 '''Only here for backwards compatibility, WrapperHook is identical to TransformerOptionsHook.'''
@@ -436,59 +541,46 @@ class HookGroup:
 
 class HookKeyframe:
     def __init__(self, strength: float, start_percent=0.0, guarantee_steps=1):
-        self.strength = strength
-        # scheduling
+        self.strength = float(strength)
         self.start_percent = float(start_percent)
-        self.start_t = 999999999.9
-        self.guarantee_steps = guarantee_steps
-
-    def get_effective_guarantee_steps(self, max_sigma: torch.Tensor):
-        '''If keyframe starts before current sampling range (max_sigma), treat as 0.'''
-        if self.start_t > max_sigma:
-            return 0
-        return self.guarantee_steps
+        self.guarantee_steps = int(guarantee_steps)
+        if self.guarantee_steps < 1:
+            raise ValueError("guarantee_steps must be positive")
 
     def clone(self):
-        c = HookKeyframe(strength=self.strength,
-                         start_percent=self.start_percent, guarantee_steps=self.guarantee_steps)
-        c.start_t = self.start_t
-        return c
+        return HookKeyframe(
+            strength=self.strength,
+            start_percent=self.start_percent,
+            guarantee_steps=self.guarantee_steps,
+        )
 
 class HookKeyframeGroup:
     def __init__(self):
         self.keyframes: list[HookKeyframe] = []
-        self._current_keyframe: HookKeyframe = None
-        self._current_used_steps = 0
-        self._current_index = 0
-        self._current_strength = None
-        self._curr_t = -1.
 
-    # properties shadow those of HookWeightsKeyframe
     @property
     def strength(self):
-        if self._current_keyframe is not None:
-            return self._current_keyframe.strength
-        return 1.0
+        return self.keyframes[0].strength if self.keyframes else 1.0
 
-    def reset(self):
-        self._current_keyframe = None
-        self._current_used_steps = 0
-        self._current_index = 0
-        self._current_strength = None
-        self.curr_t = -1.
-        self._set_first_as_current()
+    @property
+    def contribution_gain(self):
+        if not self.keyframes:
+            return ContributionGain()
+        return ContributionGain(
+            timeline=GainTimeline.from_keyframes(
+                GainKeyframe(
+                    keyframe_id=f"hook.{index}",
+                    anchor=keyframe.start_percent,
+                    gain=keyframe.strength,
+                    minimum_realized_steps=keyframe.guarantee_steps,
+                )
+                for index, keyframe in enumerate(self.keyframes)
+            )
+        )
 
     def add(self, keyframe: HookKeyframe):
-        # add to end of list, then sort
         self.keyframes.append(keyframe)
         self.keyframes = get_sorted_list_via_attr(self.keyframes, "start_percent")
-        self._set_first_as_current()
-
-    def _set_first_as_current(self):
-        if len(self.keyframes) > 0:
-            self._current_keyframe = self.keyframes[0]
-        else:
-            self._current_keyframe = None
 
     def has_guarantee_steps(self):
         for kf in self.keyframes:
@@ -506,46 +598,7 @@ class HookKeyframeGroup:
         c = HookKeyframeGroup()
         for keyframe in self.keyframes:
             c.keyframes.append(keyframe.clone())
-        c._set_first_as_current()
         return c
-
-    def initialize_timesteps(self, model: BaseModel):
-        for keyframe in self.keyframes:
-            keyframe.start_t = model.model_sampling.percent_to_sigma(keyframe.start_percent)
-
-    def prepare_current_keyframe(self, curr_t: float, transformer_options: dict[str, torch.Tensor]) -> bool:
-        if self.is_empty():
-            return False
-        if curr_t == self._curr_t:
-            return False
-        max_sigma = torch.max(transformer_options["sample_sigmas"])
-        prev_index = self._current_index
-        prev_strength = self._current_strength
-        # if met guaranteed steps, look for next keyframe in case need to switch
-        if self._current_used_steps >= self._current_keyframe.get_effective_guarantee_steps(max_sigma):
-            # if has next index, loop through and see if need to switch
-            if self.has_index(self._current_index+1):
-                for i in range(self._current_index+1, len(self.keyframes)):
-                    eval_c = self.keyframes[i]
-                    # check if start_t is greater or equal to curr_t
-                    # NOTE: t is in terms of sigmas, not percent, so bigger number = earlier step in sampling
-                    if eval_c.start_t >= curr_t:
-                        self._current_index = i
-                        self._current_strength = eval_c.strength
-                        self._current_keyframe = eval_c
-                        self._current_used_steps = 0
-                        # if guarantee_steps greater than zero, stop searching for other keyframes
-                        if self._current_keyframe.get_effective_guarantee_steps(max_sigma) > 0:
-                            break
-                    # if eval_c is outside the percent range, stop looking further
-                    else:
-                        break
-        # update steps current context is used
-        self._current_used_steps += 1
-        # update current timestep this was performed on
-        self._curr_t = curr_t
-        # return True if keyframe changed, False if no change
-        return prev_index != self._current_index and prev_strength != self._current_strength
 
 
 class InterpolationMethod:
@@ -724,8 +777,14 @@ def set_hooks_for_conditioning(cond, hooks: HookGroup, append_hooks=True, cache:
 def set_timesteps_for_conditioning(cond, timestep_range: tuple[float,float]):
     if timestep_range is None:
         return cond
-    return conditioning_set_values(cond, {"start_percent": timestep_range[0],
-                                          "end_percent": timestep_range[1]})
+    updated = []
+    timeline = GainTimeline.active_range(*timestep_range)
+    for tensor, metadata in cond:
+        metadata = metadata.copy()
+        gain = metadata.get("contribution_gain", ContributionGain())
+        metadata["contribution_gain"] = gain.with_timeline(timeline)
+        updated.append([tensor, metadata])
+    return updated
 
 def set_mask_for_conditioning(cond, mask: torch.Tensor, set_cond_area: str, strength: float):
     if mask is None:
@@ -735,9 +794,16 @@ def set_mask_for_conditioning(cond, mask: torch.Tensor, set_cond_area: str, stre
         set_area_to_bounds = True
     if len(mask.shape) < 3:
         mask = mask.unsqueeze(0)
-    return conditioning_set_values(cond, {'mask': mask,
-                                          'set_area_to_bounds': set_area_to_bounds,
-                                          'mask_strength': strength})
+    updated = []
+    for tensor, metadata in cond:
+        metadata = metadata.copy()
+        gain = metadata.get("contribution_gain", ContributionGain())
+        metadata["contribution_gain"] = gain.scaled(strength)
+        metadata["mask"] = mask
+        metadata["effect_masks"] = (mask,)
+        metadata["set_area_to_bounds"] = set_area_to_bounds
+        updated.append([tensor, metadata])
+    return updated
 
 def combine_conditioning(conds: list):
     combined_conds = []
