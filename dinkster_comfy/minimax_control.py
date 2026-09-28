@@ -68,6 +68,7 @@ def load_minimax_h3_fun_control_patch(path):
         device=model_management.unet_offload_device(),
         dtype=dtype,
     )
+    model.requires_grad_(False)
     patcher = CoreModelPatcher(
         model,
         load_device=load_device,
