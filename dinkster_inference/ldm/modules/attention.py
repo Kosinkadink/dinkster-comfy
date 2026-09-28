@@ -17,6 +17,9 @@ from .diffusionmodules.util import AlphaBlender, timestep_embedding
 from .sub_quadratic_attention import efficient_dot_product_attention
 
 from dinkster_inference import model_management
+import dinkster_inference.model_prefetch
+
+SOL_ATTN_PRODUCER_CHUNK = 4096
 
 if model_management.xformers_enabled():
     import xformers
@@ -693,6 +696,30 @@ def attention_comfy_kitchen_sol(q, k, v, heads, mask=None, attn_precision=None, 
     return out
 
 
+def attention_comfy_kitchen_sol_chunked(x, qkv_proj, out_proj, q_norm, k_norm, heads, rope_freqs, *, kmean=None, vscale=None, **options):
+    rows = x.shape[0]
+
+    def chunks():
+        for offset in range(0, rows, SOL_ATTN_PRODUCER_CHUNK):
+            yield qkv_proj(x[offset:offset + SOL_ATTN_PRODUCER_CHUNK])
+
+    with dinkster_inference.model_prefetch.pause_malloc_graph():
+        query_weight = model_management.cast_to(q_norm.weight, device=x.device)
+        key_weight = model_management.cast_to(k_norm.weight, device=x.device)
+        out, key_mean, value_scale = comfy_kitchen.sol_attn_chunked(
+            chunks,
+            rows,
+            heads,
+            rope_freqs,
+            (query_weight, key_weight),
+            kmean=kmean,
+            vscale=vscale,
+            rope_eps=q_norm.eps,
+            **options,
+        )
+    return out_proj(out.view(rows, -1)), key_mean, value_scale
+
+
 def _attention_comfy_kitchen_int8_containers(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
     q = q.take()
     k = k.take()
@@ -964,6 +991,7 @@ optimized_attention_masked = optimized_attention
 if COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE:
     register_attention_function("comfy_kitchen_int8", attention_comfy_kitchen_int8)
 register_attention_function("comfy_kitchen_sol", attention_comfy_kitchen_sol)
+register_attention_function("comfy_kitchen_sol_chunked", attention_comfy_kitchen_sol_chunked)
 if SAGE_ATTENTION_IS_AVAILABLE:
     register_attention_function("sage", attention_sage)
 if SAGE_ATTENTION3_IS_AVAILABLE:
