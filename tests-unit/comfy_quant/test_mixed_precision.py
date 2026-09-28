@@ -12,13 +12,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 def has_gpu():
     return torch.cuda.is_available()
 
-from dinkster_comfy.cli_args import args
+from dinkster_inference.cli_args import args
 if not has_gpu():
     args.cpu = True
 
-from dinkster_comfy import ops
-from dinkster_comfy.quant_ops import QUANT_ALGOS, QuantizedTensor
-import dinkster_comfy.utils
+from dinkster_inference import ops
+from dinkster_inference.quant_ops import QUANT_ALGOS, QuantizedTensor
+import dinkster_inference.utils
 
 
 class SimpleModel(torch.nn.Module):
@@ -98,7 +98,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
             "layer3.weight_scale": torch.tensor(1.5, dtype=torch.float32),
         }
 
-        state_dict, _ = dinkster_comfy.utils.convert_old_quants(state_dict, metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})})
+        state_dict, _ = dinkster_inference.utils.convert_old_quants(state_dict, metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})})
         # Create model and load state dict (strict=False because custom loading pops keys)
         model = SimpleModel(operations=ops.mixed_precision_ops({}))
         model.load_state_dict(state_dict, strict=False)
@@ -147,7 +147,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
             "layer3.bias": torch.randn(40, dtype=torch.bfloat16),
         }
 
-        state_dict1, _ = dinkster_comfy.utils.convert_old_quants(state_dict1, metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})})
+        state_dict1, _ = dinkster_inference.utils.convert_old_quants(state_dict1, metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})})
         model = SimpleModel(operations=ops.mixed_precision_ops({}))
         model.load_state_dict(state_dict1, strict=False)
 
@@ -185,7 +185,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
             "layer3.bias": torch.randn(40, dtype=torch.bfloat16),
         }
 
-        state_dict, _ = dinkster_comfy.utils.convert_old_quants(state_dict, metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})})
+        state_dict, _ = dinkster_inference.utils.convert_old_quants(state_dict, metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})})
         model = SimpleModel(operations=ops.mixed_precision_ops({}))
         model.load_state_dict(state_dict, strict=False)
 
@@ -223,7 +223,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
             "layer3.bias": torch.randn(40, dtype=torch.bfloat16),
         }
 
-        state_dict, _ = dinkster_comfy.utils.convert_old_quants(state_dict, metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})})
+        state_dict, _ = dinkster_inference.utils.convert_old_quants(state_dict, metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})})
 
         # Load should raise KeyError for unknown format in QUANT_FORMAT_MIXINS
         model = SimpleModel(operations=ops.mixed_precision_ops({}))
@@ -255,7 +255,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
             "layer.weight_scale": q_weight._params.scale,
         }
 
-        state_dict, _ = dinkster_comfy.utils.convert_old_quants(
+        state_dict, _ = dinkster_inference.utils.convert_old_quants(
             state_dict,
             metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})},
         )
@@ -290,7 +290,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
         """On a device that can't run comfy_kitchen's fast int8 matmul (e.g. MPS,
         which lacks aten::_int_mm), pick_operations must mark int8 formats as
         disabled so layers dequantize instead of taking the fast quantized path."""
-        import dinkster_comfy.model_management as mm
+        import dinkster_inference.model_management as mm
 
         orig_supports_int8 = mm.supports_int8_compute
         mm.supports_int8_compute = lambda device=None: False
@@ -308,7 +308,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
                 "layer.weight_scale": q_weight._params.scale,
             }
             layer_quant_config = {"layer": {"format": "int8_tensorwise"}}
-            state_dict, _ = dinkster_comfy.utils.convert_old_quants(
+            state_dict, _ = dinkster_inference.utils.convert_old_quants(
                 state_dict,
                 metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})},
             )
@@ -382,7 +382,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
         MPS machine that must still report int8 as unsupported instead of
         silently defaulting to True, matching supports_fp64's handling of the
         same device=None case (see Comfy-Org/ComfyUI#16136)."""
-        import dinkster_comfy.model_management as mm
+        import dinkster_inference.model_management as mm
 
         orig_cpu_state = mm.cpu_state
         mm.cpu_state = mm.CPUState.MPS
@@ -418,7 +418,7 @@ class TestMixedPrecisionOps(unittest.TestCase):
             "layer.weight_scale": q_weight._params.scale,
         }
 
-        state_dict, _ = dinkster_comfy.utils.convert_old_quants(
+        state_dict, _ = dinkster_inference.utils.convert_old_quants(
             state_dict,
             metadata={"_quantization_metadata": json.dumps({"layers": layer_quant_config})},
         )

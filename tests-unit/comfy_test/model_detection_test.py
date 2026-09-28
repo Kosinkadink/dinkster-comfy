@@ -2,10 +2,10 @@ from collections import defaultdict
 
 import torch
 
-from dinkster_comfy.model_detection import detect_unet_config, model_config_from_unet, model_config_from_unet_config
-from dinkster_comfy.ldm.lumina.model import NextDiT
-import dinkster_comfy.ops
-import dinkster_comfy.supported_models
+from dinkster_inference.model_detection import detect_unet_config, model_config_from_unet, model_config_from_unet_config
+from dinkster_inference.ldm.lumina.model import NextDiT
+import dinkster_inference.ops
+import dinkster_inference.supported_models
 
 
 def _freeze(value):
@@ -135,7 +135,7 @@ class TestModelDetection:
 
     def test_longcat_before_schnell_in_models_list(self):
         """LongCatImage must appear before FluxSchnell in the models list."""
-        models = dinkster_comfy.supported_models.models
+        models = dinkster_inference.supported_models.models
         longcat_idx = next(i for i, m in enumerate(models) if m.__name__ == "LongCatImage")
         schnell_idx = next(i for i, m in enumerate(models) if m.__name__ == "FluxSchnell")
         assert longcat_idx < schnell_idx, (
@@ -312,10 +312,10 @@ class TestModelDetection:
             if learned_padding:
                 sd["cap_pad_token"] = torch.empty(1, 3840, device="meta")
                 sd["x_pad_token"] = torch.empty(1, 3840, device="meta")
-                assert type(model_config_from_unet(sd, "")) is dinkster_comfy.supported_models.ZImage
+                assert type(model_config_from_unet(sd, "")) is dinkster_inference.supported_models.ZImage
 
             model_config = model_config_from_unet(sd, "", metadata={"config": '{"transformer": {"image_model": "ming_image"}}'})
-            model = NextDiT(**model_config.unet_config, device="meta", operations=dinkster_comfy.ops.manual_cast)
+            model = NextDiT(**model_config.unet_config, device="meta", operations=dinkster_inference.ops.manual_cast)
             original_sd = model.state_dict()
             del original_sd["__ming_image__"]
             missing, unexpected = model.load_state_dict(original_sd, strict=False, assign=True)
@@ -325,13 +325,13 @@ class TestModelDetection:
             saved_sd = model_config.process_unet_state_dict_for_saving(model.state_dict())
             reloaded = model_config_from_unet(saved_sd, "model.diffusion_model.")
 
-            assert type(reloaded) is dinkster_comfy.supported_models.MingImage
+            assert type(reloaded) is dinkster_inference.supported_models.MingImage
             assert reloaded.latent_format.scale_factor == model_config.latent_format.scale_factor
             assert reloaded.sampling_settings == model_config.sampling_settings
             assert reloaded.unet_config == model_config.unet_config
 
             unprefixed = {k.removeprefix("model.diffusion_model."): v for k, v in saved_sd.items()}
-            assert type(model_config_from_unet(unprefixed, "")) is dinkster_comfy.supported_models.MingImage
+            assert type(model_config_from_unet(unprefixed, "")) is dinkster_inference.supported_models.MingImage
             model.load_state_dict(reloaded.process_unet_state_dict(unprefixed), strict=True, assign=True)
 
     def test_unet_config_and_required_keys_combination_is_unique(self):
@@ -339,7 +339,7 @@ class TestModelDetection:
         ``unet_config`` and ``required_keys``. If two models share the same
         combination, ``BASE.matches`` cannot disambiguate between them and the
         first one in the list will always win."""
-        models = dinkster_comfy.supported_models.models
+        models = dinkster_inference.supported_models.models
         groups = defaultdict(list)
         for model in models:
             key = (_freeze(model.unet_config), _freeze(model.required_keys))

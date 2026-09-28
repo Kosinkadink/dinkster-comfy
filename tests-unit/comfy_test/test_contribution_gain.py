@@ -1,13 +1,13 @@
 import pytest
 import torch
 
-import dinkster_comfy.float as float_module
-import dinkster_comfy.lora as lora_module
-import dinkster_comfy.model_patcher as model_patcher_module
-import dinkster_comfy.ops as ops_module
-from dinkster_comfy.contribution_gain import ContributionGain, GainKeyframe, GainTimeline
-from dinkster_comfy.controlnet import ControlBase
-from dinkster_comfy.hooks import (
+import dinkster_inference.float as float_module
+import dinkster_inference.lora as lora_module
+import dinkster_inference.model_patcher as model_patcher_module
+import dinkster_inference.ops as ops_module
+from dinkster_inference.contribution_gain import ContributionGain, GainKeyframe, GainTimeline
+from dinkster_inference.controlnet import ControlBase
+from dinkster_inference.hooks import (
     EnumWeightTarget,
     Hook,
     HookGroup,
@@ -18,9 +18,9 @@ from dinkster_comfy.hooks import (
     create_target_dict,
     load_hook_lora_for_models,
 )
-from dinkster_comfy.model_patcher import HookWeightPatch, ModelPatcher
-from dinkster_comfy.samplers import realize_contribution_gains
-from dinkster_comfy.weight_adapter.base import WeightAdapterBase
+from dinkster_inference.model_patcher import HookWeightPatch, ModelPatcher
+from dinkster_inference.samplers import realize_contribution_gains
+from dinkster_inference.weight_adapter.base import WeightAdapterBase
 
 
 def test_constant_gain_realizes_once_for_each_executed_sigma():

@@ -1,8 +1,8 @@
 import torch
 from torch import nn
 
-from dinkster_comfy.ldm.minimax.model import MiniMaxH3Model, time_shift_sigma
-from dinkster_comfy.model_sampling import CONST
+from dinkster_inference.ldm.minimax.model import MiniMaxH3Model, time_shift_sigma
+from dinkster_inference.model_sampling import CONST
 
 
 def make_model(video_output, audio_output):

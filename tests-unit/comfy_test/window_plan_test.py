@@ -10,7 +10,7 @@ from dataclasses import FrozenInstanceError
 from typing import Any, cast
 
 import pytest
-from dinkster_comfy.window_plan import (
+from dinkster_inference.window_plan import (
     AccumulationDType,
     CompositeWindowPlan,
     IntegerAffineIndexMap,

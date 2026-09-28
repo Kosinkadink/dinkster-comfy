@@ -1,6 +1,6 @@
 from unittest import mock
 
-import dinkster_comfy.storage
+import dinkster_inference.storage
 
 
 def test_fast_nvme_link_thresholds():
@@ -11,16 +11,16 @@ def test_fast_nvme_link_thresholds():
         ("8.0 GT/s PCIe", "2", False),
     ]
     for speed, width, expected in cases:
-        with mock.patch.object(dinkster_comfy.storage, "_read", side_effect=[speed, width]):
-            assert dinkster_comfy.storage._fast_nvme("nvme0n1") is expected
+        with mock.patch.object(dinkster_inference.storage, "_read", side_effect=[speed, width]):
+            assert dinkster_inference.storage._fast_nvme("nvme0n1") is expected
 
 
 def test_non_nvme_is_not_fast():
-    assert dinkster_comfy.storage._fast_nvme("sda") is False
+    assert dinkster_inference.storage._fast_nvme("sda") is False
 
 
 def test_every_model_file_must_be_on_fast_storage():
-    with mock.patch.object(dinkster_comfy.storage, "fast_storage", side_effect=[True, False]):
-        assert dinkster_comfy.storage.model_fast_disk(["first", "second"]) is False
-    with mock.patch.object(dinkster_comfy.storage, "fast_storage", side_effect=[True, True]):
-        assert dinkster_comfy.storage.model_fast_disk(["first", "second"]) is True
+    with mock.patch.object(dinkster_inference.storage, "fast_storage", side_effect=[True, False]):
+        assert dinkster_inference.storage.model_fast_disk(["first", "second"]) is False
+    with mock.patch.object(dinkster_inference.storage, "fast_storage", side_effect=[True, True]):
+        assert dinkster_inference.storage.model_fast_disk(["first", "second"]) is True

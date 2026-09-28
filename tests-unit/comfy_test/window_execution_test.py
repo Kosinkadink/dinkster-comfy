@@ -1,28 +1,28 @@
 import torch
 
-from dinkster_comfy.cli_args import args
+from dinkster_inference.cli_args import args
 
 args.cpu = True
 
-from dinkster_comfy.context_windows import (
+from dinkster_inference.context_windows import (
     ContextFuseMethods,
     ContextSchedules,
     TemporalWindowPlan,
     get_matching_context_schedule,
     get_matching_fuse_method,
 )
-from dinkster_comfy.conds import CONDConstant
-from dinkster_comfy.contribution_gain import ContributionGain
-from dinkster_comfy.samplers import compile_window_masks, get_area_and_mult
-from dinkster_comfy import utils
-from dinkster_comfy.window_execution import (
+from dinkster_inference.conds import CONDConstant
+from dinkster_inference.contribution_gain import ContributionGain
+from dinkster_inference.samplers import compile_window_masks, get_area_and_mult
+from dinkster_inference import utils
+from dinkster_inference.window_execution import (
     CompiledWindowField,
     WindowPlanExecutor,
     WindowTensorLayout,
     gather_window_tensor,
     merge_window_tensors,
 )
-from dinkster_comfy.window_plan import (
+from dinkster_inference.window_plan import (
     LayerWindow,
     KindAxisMap,
     MediaAxis,
@@ -36,7 +36,7 @@ from dinkster_comfy.window_plan import (
     IntegerAffineIndexMap,
     ProportionalRangeIndexMap,
 )
-from dinkster_comfy.nested_tensor import NestedTensor
+from dinkster_inference.nested_tensor import NestedTensor
 
 
 def _layer(axis, windows):
