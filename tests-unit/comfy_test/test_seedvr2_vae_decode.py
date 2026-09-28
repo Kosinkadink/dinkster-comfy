@@ -4,12 +4,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-from dinkster_comfy.cli_args import args as cli_args
+from dinkster_inference.cli_args import args as cli_args
 
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
-import dinkster_comfy.ldm.seedvr.vae as vae_mod  # noqa: E402
+import dinkster_inference.ldm.seedvr.vae as vae_mod  # noqa: E402
 
 
 _LATENT_CHANNELS = vae_mod.SEEDVR2_LATENT_CHANNELS

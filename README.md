@@ -1,15 +1,15 @@
-# dinkster-comfy
+# dinkster-inference
 
-`dinkster-comfy` is Dinkster's inference library. It starts from ComfyUI's
+`dinkster-inference` is Dinkster's inference library. It starts from ComfyUI's
 `comfy/` package while excluding the ComfyUI application, server, nodes, and
 web assets.
 
-The distribution name is `dinkster-comfy`; Python imports use
-`dinkster_comfy`:
+The distribution name is `dinkster-inference`; Python imports use
+`dinkster_inference`:
 
 ```bash
 python -m pip install .
-python -c "import dinkster_comfy.sd, dinkster_comfy.samplers, dinkster_comfy.model_management"
+python -c "import dinkster_inference.sd, dinkster_inference.samplers, dinkster_inference.model_management"
 ```
 
 The upstream fork point and maintained differences are recorded in

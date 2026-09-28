@@ -6,12 +6,12 @@ from typing import Any, cast
 import pytest
 import torch
 
-from dinkster_comfy.model_base import BaseModel
-from dinkster_comfy.model_patcher import LowVramPatch, ModelPatcher
-from dinkster_comfy.patch_program import ModuleInsertionEntry, PatchProgram
-from dinkster_comfy.patcher_extension import PatcherInjection
-from dinkster_comfy.weight_adapter.bypass import BypassInjectionManager
-from dinkster_comfy.weight_adapter.lora import LoRAAdapter
+from dinkster_inference.model_base import BaseModel
+from dinkster_inference.model_patcher import LowVramPatch, ModelPatcher
+from dinkster_inference.patch_program import ModuleInsertionEntry, PatchProgram
+from dinkster_inference.patcher_extension import PatcherInjection
+from dinkster_inference.weight_adapter.bypass import BypassInjectionManager
+from dinkster_inference.weight_adapter.lora import LoRAAdapter
 
 
 def _program(value: torch.Tensor, *, target: str = "block.weight") -> PatchProgram:

@@ -23,7 +23,7 @@ jobs:
           python -m pip install -r tests-unit/requirements.txt
       - name: Verify standalone imports
         run: |
-          if ! python -c "import dinkster_comfy.cli_args as c; c.args.cpu = True; import dinkster_comfy.sd, dinkster_comfy.samplers, dinkster_comfy.model_management" 2>import-error.log; then
+          if ! python -c "import dinkster_inference.cli_args as c; c.args.cpu = True; import dinkster_inference.sd, dinkster_inference.samplers, dinkster_inference.model_management" 2>import-error.log; then
             message=$(sed ':a;N;$!ba;s/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' import-error.log)
             echo "::error title=Standalone import failed::$message"
             exit 1

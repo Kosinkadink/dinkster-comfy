@@ -6,9 +6,9 @@ from pathlib import Path
 
 
 REWRITES = (
-    (re.compile(r"\bcomfy\."), "dinkster_comfy."),
-    (re.compile(r"\bfrom comfy\b"), "from dinkster_comfy"),
-    (re.compile(r"\bimport comfy\b"), "import dinkster_comfy"),
+    (re.compile(r"\bcomfy\."), "dinkster_inference."),
+    (re.compile(r"\bfrom comfy\b"), "from dinkster_inference"),
+    (re.compile(r"\bimport comfy\b"), "import dinkster_inference"),
 )
 
 
@@ -25,7 +25,7 @@ def rewrite(path: Path) -> bool:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Rewrite upstream ComfyUI Python imports for dinkster_comfy."
+        description="Rewrite upstream ComfyUI Python imports for dinkster_inference."
     )
     parser.add_argument("paths", nargs="+", type=Path)
     args = parser.parse_args()

@@ -6,18 +6,18 @@ import pytest
 import torch
 from torch import nn
 
-from dinkster_comfy.cli_args import args
+from dinkster_inference.cli_args import args
 
 if not torch.cuda.is_available():
     args.cpu = True
 
-import dinkster_comfy  # noqa: E402
-import dinkster_comfy.latent_formats  # noqa: E402
-import dinkster_comfy.ldm.seedvr.model as seedvr_model  # noqa: E402
-import dinkster_comfy.ldm.seedvr.vae as seedvr_vae_mod  # noqa: E402
-import dinkster_comfy.ops as comfy_ops  # noqa: E402
-import dinkster_comfy.sample  # noqa: E402
-from dinkster_comfy.ldm.seedvr.model import NaDiT  # noqa: E402
+import dinkster_inference  # noqa: E402
+import dinkster_inference.latent_formats  # noqa: E402
+import dinkster_inference.ldm.seedvr.model as seedvr_model  # noqa: E402
+import dinkster_inference.ldm.seedvr.vae as seedvr_vae_mod  # noqa: E402
+import dinkster_inference.ops as comfy_ops  # noqa: E402
+import dinkster_inference.sample  # noqa: E402
+from dinkster_inference.ldm.seedvr.model import NaDiT  # noqa: E402
 
 
 _LATENT_CHANNELS = seedvr_vae_mod.SEEDVR2_LATENT_CHANNELS
@@ -171,10 +171,10 @@ def test_seedvr2_forward_requires_conditioning_latents():
 
 
 def test_seedvr2_latent_format_uses_native_video_latent_shape():
-    latent_format = dinkster_comfy.latent_formats.SeedVR2()
+    latent_format = dinkster_inference.latent_formats.SeedVR2()
     latent_image = torch.zeros(1, 1, 4, 5)
 
-    fixed = dinkster_comfy.sample.fix_empty_latent_channels(_Model(latent_format), latent_image)
+    fixed = dinkster_inference.sample.fix_empty_latent_channels(_Model(latent_format), latent_image)
 
     assert latent_format.latent_channels == _LATENT_CHANNELS
     assert latent_format.latent_dimensions == 3

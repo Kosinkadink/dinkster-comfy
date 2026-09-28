@@ -2,12 +2,12 @@
 
 import torch
 
-from dinkster_comfy.cli_args import args
+from dinkster_inference.cli_args import args
 
 if not torch.cuda.is_available():
     args.cpu = True
 
-from dinkster_comfy.text_encoders.qwen_vl import process_qwen2vl_images  # noqa: E402
+from dinkster_inference.text_encoders.qwen_vl import process_qwen2vl_images  # noqa: E402
 
 
 def test_extra_channels_are_dropped_before_patching():

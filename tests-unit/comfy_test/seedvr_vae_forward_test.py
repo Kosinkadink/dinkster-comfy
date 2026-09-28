@@ -4,12 +4,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-from dinkster_comfy.cli_args import args as cli_args
+from dinkster_inference.cli_args import args as cli_args
 
 if not torch.cuda.is_available():
     cli_args.cpu = True
 
-from dinkster_comfy.ldm.seedvr.vae import SEEDVR2_LATENT_CHANNELS, VideoAutoencoderKL  # noqa: E402
+from dinkster_inference.ldm.seedvr.vae import SEEDVR2_LATENT_CHANNELS, VideoAutoencoderKL  # noqa: E402
 
 
 _LATENT_SHAPE = (1, SEEDVR2_LATENT_CHANNELS, 2, 2, 2)

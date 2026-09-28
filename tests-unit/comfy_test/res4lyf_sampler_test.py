@@ -8,11 +8,11 @@ from typing import Any
 import pytest
 import torch
 
-from dinkster_comfy import model_sampling, samplers
-from dinkster_comfy.k_diffusion import sampling as k_diffusion_sampling
-from dinkster_comfy.res4lyf_rk import _sde_step, prepare_rk_sigmas, resolve_rk_tableau
-from dinkster_comfy.res4lyf_sampler import RES4LYFTwoStreamNoise, RES4LYF_SAMPLERS, sampler_function
-from dinkster_comfy.sampler_assembly import Parameterization, SamplerInfo, SolverStateEvent, SubstepEvent
+from dinkster_inference import model_sampling, samplers
+from dinkster_inference.k_diffusion import sampling as k_diffusion_sampling
+from dinkster_inference.res4lyf_rk import _sde_step, prepare_rk_sigmas, resolve_rk_tableau
+from dinkster_inference.res4lyf_sampler import RES4LYFTwoStreamNoise, RES4LYF_SAMPLERS, sampler_function
+from dinkster_inference.sampler_assembly import Parameterization, SamplerInfo, SolverStateEvent, SubstepEvent
 
 
 GOLDEN = json.loads((Path(__file__).parent / "goldens/res4lyf_rk_goldens.json").read_text())

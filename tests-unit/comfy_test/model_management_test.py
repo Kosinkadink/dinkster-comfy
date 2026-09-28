@@ -2,7 +2,7 @@ from unittest.mock import Mock, call
 
 import pytest
 
-import dinkster_comfy.model_management as model_management
+import dinkster_inference.model_management as model_management
 
 
 class NPUDevice:
