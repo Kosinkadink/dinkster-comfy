@@ -204,6 +204,7 @@ def merge_window_tensors(
     denominator = torch.zeros(output_shape, dtype=accumulation_dtype, device=first.device)
     occurrence_positions = _axis_positions(plan, layout)
     dimension_by_axis = dict(layout.axis_dimensions)
+    axis_by_dimension = {dimension: axis for axis, dimension in layout.axis_dimensions}
 
     for window, output in zip(plan.joint_windows, outputs, strict=True):
         expected_shape = list(output_shape)
@@ -218,6 +219,50 @@ def merge_window_tensors(
         ):
             raise ValueError(f"joint window {window.index} returned an incompatible tensor")
         local_entries = _kind_local_positions(plan, window, layout)
+        projected_weights = {}
+        occurrence_axes = tuple(dimension_by_axis)
+        for occurrence in window.occurrences:
+            key = tuple(
+                occurrence.local_positions[occurrence_positions[axis]]
+                for axis in occurrence_axes
+            )
+            projected_weights[key] = projected_weights.get(key, 0.0) + occurrence.weight
+        local_shape = tuple(len(local_entries[axis]) for axis in occurrence_axes)
+        weights = torch.tensor(
+            [
+                projected_weights.get(
+                    tuple(
+                        local_entries[axis][position][1]
+                        for axis, position in zip(occurrence_axes, local_positions, strict=True)
+                    ),
+                    0.0,
+                )
+                for local_positions in itertools.product(*(range(size) for size in local_shape))
+            ],
+            dtype=accumulation_dtype,
+            device=first.device,
+        ).reshape(local_shape)
+        dimension_order = sorted(
+            range(len(occurrence_axes)),
+            key=lambda index: dimension_by_axis[occurrence_axes[index]],
+        )
+        weights = weights.permute(dimension_order)
+        weight_shape = [1] * len(output_shape)
+        for axis in occurrence_axes:
+            weight_shape[dimension_by_axis[axis]] = len(local_entries[axis])
+        weights = weights.reshape(weight_shape)
+
+        if all(len(indices) == len(set(indices)) for indices in kind_indices.values()):
+            coordinates = []
+            for dimension, size in enumerate(expected_shape):
+                axis = axis_by_dimension.get(dimension)
+                values = range(size) if axis is None else kind_indices[axis]
+                coordinates.append(torch.tensor(tuple(values), device=first.device))
+            target = torch.meshgrid(*coordinates, indexing="ij")
+            accumulator[target] += output.to(accumulation_dtype) * weights
+            denominator[target] += weights.expand(expected_shape)
+            continue
+
         for local_positions in itertools.product(
             *(range(len(local_entries[axis])) for axis in dimension_by_axis)
         ):
@@ -230,14 +275,10 @@ def merge_window_tensors(
                 coordinate, primary_position = local_entries[axis][local_position]
                 source[dimension] = local_position
                 target[dimension] = coordinate
-                primary_positions[occurrence_positions[axis]] = primary_position
-            weight = sum(
-                occurrence.weight
-                for occurrence in window.occurrences
-                if all(
-                    occurrence.local_positions[position] == primary_position
-                    for position, primary_position in primary_positions.items()
-                )
+                primary_positions[axis] = primary_position
+            weight = projected_weights.get(
+                tuple(primary_positions[axis] for axis in occurrence_axes),
+                0.0,
             )
             source_index = tuple(source)
             target_index = tuple(target)
