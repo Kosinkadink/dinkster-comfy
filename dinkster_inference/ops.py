@@ -130,7 +130,7 @@ def cast_modules_with_vbar(comfy_modules, dtype, device, bias_dtype, non_blockin
     cast_buffer = None
     cast_buffer_offset = 0
     if return_faulted:
-        fully_faulted = all(not getattr(s, param_key + "_function", []) for s in comfy_modules for param_key in ("weight", "bias"))
+        fully_faulted = all(not any(not hasattr(f, "active") or f.active() for f in getattr(s, param_key + "_function", [])) for s in comfy_modules for param_key in ("weight", "bias"))
 
     def ensure_offload_stream(module, required_size, check_largest):
         nonlocal offload_stream
@@ -295,7 +295,7 @@ def resolve_cast_module_with_vbar(s, dtype, device, bias_dtype, compute_dtype, w
 
     def post_cast(s, param_key, x, dtype, resident, update_weight):
         lowvram_fn = getattr(s, param_key + "_lowvram_function", None)
-        fns = getattr(s, param_key + "_function", [])
+        fns = [f for f in getattr(s, param_key + "_function", []) if not hasattr(f, "active") or f.active()]
 
         if x is None:
             return None
@@ -414,8 +414,10 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
         weight = params[0]
         bias = params[1]
 
-    weight_has_function = len(s.weight_function) > 0
-    bias_has_function = len(s.bias_function) > 0
+    weight_functions = [f for f in s.weight_function if not hasattr(f, "active") or f.active()]
+    bias_functions = [f for f in s.bias_function if not hasattr(f, "active") or f.active()]
+    weight_has_function = len(weight_functions) > 0
+    bias_has_function = len(bias_functions) > 0
 
     weight = dinkster_inference.model_management.cast_to(s.weight, None, device, non_blocking=non_blocking, copy=weight_has_function, stream=offload_stream, r=weight)
 
@@ -429,14 +431,14 @@ def cast_bias_weight(s, input=None, dtype=None, device=None, bias_dtype=None, of
 
     if s.bias is not None:
         bias = bias.to(dtype=bias_dtype)
-        for f in s.bias_function:
+        for f in bias_functions:
             bias = f(bias)
 
     if weight_has_function or weight.dtype != dtype:
         weight = weight.to(dtype=dtype)
         if isinstance(weight, QuantizedTensor):
             weight = weight.dequantize()
-        for f in s.weight_function:
+        for f in weight_functions:
             weight = f(weight)
 
     return format_return((weight, bias, (offload_stream, weight_a, bias_a)), offloadable)

@@ -251,6 +251,21 @@ class HookWeightPatch:
             seed=dinkster_inference.utils.string_to_seed(self.key),
         )
 
+    def active(self):
+        model = self.model()
+        patcher = getattr(model, "current_patcher", None)
+        if patcher is None:
+            patcher = self.fallback_patcher()
+        if patcher is None or patcher.current_hooks is None:
+            return False
+        patches = patcher.get_combined_hook_patches(patcher.current_hooks).get(self.key, ())
+        for strength, value, strength_model, *_ in patches:
+            if not math.isclose(strength_model, 1.0) or not math.isclose(strength, 0.0):
+                return True
+            if isinstance(value, tuple) and len(value) == 2 and value[0] == "set":
+                return True
+        return False
+
 LOWVRAM_PATCH_ESTIMATE_MATH_FACTOR = 2
 
 def low_vram_patch_estimate_vram(model, key):
@@ -556,6 +571,7 @@ class ModelPatcher:
             for k1, w1 in w.items():
                 n.wrappers[k][k1] = w1.copy()
         n.is_injected = self.is_injected
+        n._materialized_insertions = self._materialized_insertions.copy()
         n.skip_injection = self.skip_injection
         # hooks
         n.hook_patches = create_hook_patches_clone(self.hook_patches)
@@ -1041,10 +1057,12 @@ class ModelPatcher:
             self.patches_uuid = program.digest
             return list(p)
 
-    def get_key_patches(self, filter_prefix=None):
+    def get_key_patches(self, filter_prefix=None, keys=None):
         model_sd = self.model_state_dict()
         p = {}
-        for k in model_sd:
+        for k in model_sd if keys is None else keys:
+            if k not in model_sd:
+                continue
             if filter_prefix is not None:
                 if not k.startswith(filter_prefix):
                     continue
@@ -1814,11 +1832,11 @@ class ModelPatcher:
                         or hook.contribution_gain.effect_masks
                     )
                     if (
-                        (
-                            isinstance(model_sd[key], QuantizedTensor)
+                        isinstance(patch, (WeightAdapterBase, WeightAdapterTrainBase))
+                        and (
+                            isinstance(get_key_weight(self.model, key)[0], QuantizedTensor)
                             or requires_output_gain
                         )
-                        and isinstance(patch, (WeightAdapterBase, WeightAdapterTrainBase))
                     ):
                         resource = ScheduledBypassAdapter.create(
                             key,
@@ -1932,7 +1950,7 @@ class ModelPatcher:
                     }
                     original_weights = None
                     if len(relevant_patches) > 0:
-                        original_weights = self.get_key_patches()
+                        original_weights = self.get_key_patches(keys=relevant_patches)
                     for key in relevant_patches:
                         if key not in model_sd_keys:
                             logging.warning(f"Cached hook would not patch. Key does not exist in model: {key}")
@@ -2112,6 +2130,26 @@ class ModelPatcherDynamic(ModelPatcher):
     def is_dynamic(self):
         return True
 
+    def _install_hook_weight_functions(self):
+        for key in self.get_hook_patch_keys():
+            module_key, separator, parameter = key.rpartition(".")
+            if not separator:
+                module_key = ""
+            functions = f"{parameter}_function"
+            module = self.model if not module_key else self.model.get_submodule(module_key)
+            weight = getattr(module, parameter, None)
+            if not hasattr(module, functions) or isinstance(weight, QuantizedTensor):
+                continue
+            weight_functions = getattr(module, functions)
+            if not any(isinstance(function, HookWeightPatch) and function.key == key for function in weight_functions):
+                weight_functions.append(HookWeightPatch(self, key))
+            self.hook_weight_function_keys.add(key)
+
+    def add_hook_patches(self, hook: dinkster_inference.hooks.WeightHook, patches, strength_patch=1.0, strength_model=1.0):
+        added = super().add_hook_patches(hook, patches, strength_patch, strength_model)
+        self._install_hook_weight_functions()
+        return added
+
     def set_in_use_by_current_prompt(self, in_use):
         self.model.dynamic_pins[self.load_device]["current_prompt"] = in_use
 
@@ -2191,6 +2229,7 @@ class ModelPatcherDynamic(ModelPatcher):
 
         with self.use_ejected():
             self.unpatch_hooks()
+            hook_patch_keys = self.get_hook_patch_keys()
 
             vbar = self._vbar_get(create=True)
             pin_state = self.model.dynamic_pins[self.load_device]
@@ -2260,6 +2299,9 @@ class ModelPatcherDynamic(ModelPatcher):
 
                     if key in self.weight_wrapper_patches:
                         weight_function.extend(self.weight_wrapper_patches[key])
+                    if key in hook_patch_keys and not isinstance(weight, QuantizedTensor):
+                        weight_function.append(HookWeightPatch(self, key))
+                        self.hook_weight_function_keys.add(key)
                     setattr(m, param_key + "_function", weight_function)
                     geometry = weight
                     if not isinstance(weight, QuantizedTensor):
@@ -2491,7 +2533,7 @@ class ModelPatcherDynamic(ModelPatcher):
         raise RuntimeError("Hooks not implemented in ModelPatcherDynamic. Please remove --fast arguments form ComfyUI startup")
 
     def unpatch_hooks(self, whitelist_keys_set: set[str]=None) -> None:
-        pass
+        self.current_hooks = None
 
     def get_non_dynamic_delegate(self):
         model_patcher = self.clone(disable_dynamic=True, model_override=self.non_dynamic_delegate_model)

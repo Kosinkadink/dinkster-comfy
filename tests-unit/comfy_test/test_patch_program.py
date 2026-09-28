@@ -6,8 +6,9 @@ from typing import Any, cast
 import pytest
 import torch
 
+from dinkster_inference.hooks import WeightHook
 from dinkster_inference.model_base import BaseModel
-from dinkster_inference.model_patcher import LowVramPatch, ModelPatcher
+from dinkster_inference.model_patcher import HookWeightPatch, LowVramPatch, ModelPatcher, ModelPatcherDynamic
 from dinkster_inference.patch_program import ModuleInsertionEntry, PatchProgram
 from dinkster_inference.patcher_extension import PatcherInjection
 from dinkster_inference.weight_adapter.bypass import BypassInjectionManager
@@ -141,6 +142,26 @@ def test_model_patcher_clone_derives_without_changing_parent() -> None:
     immutable_patches = cast(Any, child.patches)
     with pytest.raises(TypeError):
         immutable_patches["weight"] = child.patches["weight"]
+
+
+def test_dynamic_patcher_installs_hooks_registered_after_loading() -> None:
+    model = torch.nn.Linear(2, 2)
+    model.weight_function = []
+    model.bias_function = []
+    patcher = object.__new__(ModelPatcherDynamic)
+    ModelPatcher.__init__(patcher, model, torch.device("cpu"), torch.device("cpu"))
+    hook = WeightHook()
+    patches = {
+        "weight": ("diff", (torch.ones_like(model.weight),)),
+        "bias": ("diff", (torch.ones_like(model.bias),)),
+    }
+
+    assert set(patcher.add_hook_patches(hook, patches)) == {"weight", "bias"}
+    patcher.add_hook_patches(hook, patches)
+
+    assert [(type(function), function.key) for function in model.weight_function] == [(HookWeightPatch, "weight")]
+    assert [(type(function), function.key) for function in model.bias_function] == [(HookWeightPatch, "bias")]
+    assert patcher.hook_weight_function_keys == {"weight", "bias"}
 
 
 def test_model_patcher_refuses_a_mutated_bound_resource() -> None:
@@ -425,6 +446,24 @@ def test_module_insertion_clone_derives_without_changing_parent() -> None:
     assert parent.get_module_insertions() == ()
     assert child.get_module_insertions() == (_insertion("motion"),)
     assert parent.patch_program.digest != child.patch_program.digest
+
+
+def test_injected_clone_can_transition_shared_model() -> None:
+    events: list[str] = []
+    parent = _site_patcher()
+    parent.register_patch_materializer("test.module", _Materializer(events))
+    parent.set_module_insertions("motion", (_insertion("motion"),))
+    parent.inject_model()
+
+    child = parent.clone()
+    child.eject_model()
+    child.inject_model()
+
+    assert events == [
+        "materialize:motion:down_blocks.0",
+        "teardown:motion",
+        "materialize:motion:down_blocks.0",
+    ]
 
 
 def test_injections_use_structural_program_materialization() -> None:
