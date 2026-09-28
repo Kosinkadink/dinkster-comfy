@@ -670,6 +670,29 @@ def attention_comfy_kitchen_int8(q, k, v, heads, mask=None, attn_precision=None,
     return out
 
 
+@wrap_attn
+def attention_comfy_kitchen_sol(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    b = q.shape[0]
+    if skip_reshape:
+        dim_head = q.shape[-1]
+    else:
+        dim_head = q.shape[-1] // heads
+        q, k, v = _reshape_qkv_to_heads(q, k, v, b, heads, dim_head, kwargs.get("enable_gqa", False), expand_kv=False)
+        q, k, v = map(lambda tensor: tensor.transpose(1, 2), (q, k, v))
+    if mask is not None:
+        raise RuntimeError("Comfy Kitchen Sol-Attn does not support an attention mask")
+    options = kwargs.get("sol_options", {})
+    out = comfy_kitchen.sol_attn(
+        q.transpose(1, 2),
+        k.transpose(1, 2),
+        v.transpose(1, 2),
+        **options,
+    ).transpose(1, 2)
+    if not skip_output_reshape:
+        out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+    return out
+
+
 def _attention_comfy_kitchen_int8_containers(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
     q = q.take()
     k = k.take()
@@ -940,6 +963,7 @@ optimized_attention_masked = optimized_attention
 # register core-supported attention functions
 if COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE:
     register_attention_function("comfy_kitchen_int8", attention_comfy_kitchen_int8)
+register_attention_function("comfy_kitchen_sol", attention_comfy_kitchen_sol)
 if SAGE_ATTENTION_IS_AVAILABLE:
     register_attention_function("sage", attention_sage)
 if SAGE_ATTENTION3_IS_AVAILABLE:

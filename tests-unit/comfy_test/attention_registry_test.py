@@ -1,6 +1,7 @@
 import logging
 
 import pytest
+import torch
 
 from dinkster_inference.cli_args import args
 
@@ -82,3 +83,37 @@ def test_registry_selection_dispatches_through_attention_override():
     )
 
     assert result == ("q", "k", "v", 8, "worker")
+
+
+def test_sol_attention_registry_adapter_preserves_comfy_attention_layout(monkeypatch):
+    calls = []
+
+    def sol_attn(q, k, v, **kwargs):
+        calls.append((q.shape, k.shape, v.shape, kwargs))
+        return q + 1
+
+    monkeypatch.setattr(attention.comfy_kitchen, "sol_attn", sol_attn)
+    selected = attention.get_attention_function(
+        "comfy_kitchen_sol", registry=attention.create_attention_function_registry()
+    )
+    q = torch.arange(24.0).reshape(1, 2, 3, 4)
+
+    result = selected(
+        q,
+        q + 100,
+        q + 200,
+        2,
+        skip_reshape=True,
+        skip_output_reshape=True,
+        sol_options={"tau": 1.3, "sink_blocks": [0, 2]},
+    )
+
+    assert calls == [
+        (
+            torch.Size((1, 3, 2, 4)),
+            torch.Size((1, 3, 2, 4)),
+            torch.Size((1, 3, 2, 4)),
+            {"tau": 1.3, "sink_blocks": [0, 2]},
+        )
+    ]
+    assert torch.equal(result, q + 1)

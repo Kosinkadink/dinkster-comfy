@@ -53,6 +53,7 @@ class WrappersMP:
     SAMPLER_SAMPLE = "sampler_sample"
     PREDICT_NOISE = "predict_noise"
     CALC_COND_BATCH = "calc_cond_batch"
+    WINDOW_EXECUTE = "window_execute"
     APPLY_MODEL = "apply_model"
     DIFFUSION_MODEL = "diffusion_model"
 
