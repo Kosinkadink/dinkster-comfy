@@ -277,7 +277,15 @@ class BaseModel(torch.nn.Module):
             self.current_patcher is not None and self.current_patcher.is_dynamic()
         )
 
-        model_output = self.diffusion_model(xc, t, context=context, control=control, transformer_options=transformer_options, **extra_conds)
+        previous_transformer_options = None
+        if self.current_patcher is not None:
+            previous_transformer_options = self.current_patcher.current_transformer_options
+            self.current_patcher.current_transformer_options = transformer_options
+        try:
+            model_output = self.diffusion_model(xc, t, context=context, control=control, transformer_options=transformer_options, **extra_conds)
+        finally:
+            if self.current_patcher is not None:
+                self.current_patcher.current_transformer_options = previous_transformer_options
         if len(model_output) > 1 and not torch.is_tensor(model_output):
             model_output, _ = utils.pack_latents(model_output)
 

@@ -475,13 +475,16 @@ def test_additional_models_use_clone_scoped_program_resources() -> None:
     assert isinstance(parent.additional_models["control"], list)
     child = parent.clone()
 
-    assert parent.get_additional_models_with_key("control") == [auxiliary]
+    bound_auxiliary = parent.get_additional_models_with_key("control")[0]
+    assert bound_auxiliary is not auxiliary
+    assert bound_auxiliary.clone_base_uuid == auxiliary.clone_base_uuid
     cloned_auxiliary = child.get_additional_models_with_key("control")[0]
     assert cloned_auxiliary is not auxiliary
+    assert cloned_auxiliary is not bound_auxiliary
     assert cloned_auxiliary.clone_base_uuid == auxiliary.clone_base_uuid
     child.remove_additional_models("control")
     assert child.get_additional_models_with_key("control") == []
-    assert parent.get_additional_models_with_key("control") == [auxiliary]
+    assert parent.get_additional_models_with_key("control") == [bound_auxiliary]
 
 
 def test_module_insertion_revalidates_resources_before_materialization() -> None:

@@ -15,7 +15,9 @@ This is useful for:
     - Supporting multiple adapters with different strengths dynamically
 """
 
+import copy
 import logging
+from dataclasses import dataclass, field
 from typing import Optional, Union
 
 import torch
@@ -24,6 +26,7 @@ import torch.nn as nn
 import dinkster_comfy.model_management
 from .base import WeightAdapterBase, WeightAdapterTrainBase
 from dinkster_comfy.patcher_extension import PatcherInjection
+from dinkster_comfy.patch_program import PatchResource
 
 # Type alias for adapters that support bypass mode
 BypassAdapter = Union[WeightAdapterBase, WeightAdapterTrainBase]
@@ -120,10 +123,12 @@ class BypassForwardHook:
         module: nn.Module,
         adapter: BypassAdapter,
         multiplier: float = 1.0,
+        multiplier_provider=None,
     ):
         self.module = module
         self.adapter = adapter
         self.multiplier = multiplier
+        self.multiplier_provider = multiplier_provider
         self.original_forward = None
 
         # Determine layer type and conv params from module class (works for quantized layers)
@@ -156,9 +161,11 @@ class BypassForwardHook:
             where weights may not be in a usable format. All necessary shape
             information is provided via adapter attributes set during inject().
         """
+        self.adapter.multiplier = 1.0 if self.multiplier_provider is not None else self.multiplier
+
         # Check if adapter has custom bypass_forward (e.g., GLoRA)
         adapter_bypass = getattr(self.adapter, "bypass_forward", None)
-        if adapter_bypass is not None:
+        if adapter_bypass is not None and self.multiplier_provider is None:
             # Check if it's overridden (not the base class default)
             # Need to check both base classes since adapter could be either type
             adapter_type = type(self.adapter)
@@ -172,7 +179,10 @@ class BypassForwardHook:
         # Default bypass: g(f(x) + h(x, f(x)))
         base_out = self.original_forward(x, *args, **kwargs)
         h_out = self.adapter.h(x, base_out)
-        return self.adapter.g(base_out + h_out)
+        output = self.adapter.g(base_out + h_out)
+        if self.multiplier_provider is None:
+            return output
+        return base_out + (output - base_out) * self.multiplier_provider(output)
 
     def inject(self):
         """Replace module forward with bypass version."""
@@ -259,6 +269,70 @@ class BypassForwardHook:
         logging.debug(
             f"[BypassHook] Ejected bypass forward for {type(self.module).__name__}"
         )
+
+
+@dataclass(frozen=True)
+class ScheduledBypassAdapter:
+    key: str
+    adapter_identity: str
+    gain_identity: str
+    strength: float
+    adapter: BypassAdapter = field(compare=False, repr=False)
+    hook_ref: object = field(compare=False, repr=False)
+
+    @classmethod
+    def create(cls, key, adapter, strength, gain, hook_ref):
+        return cls(
+            key=key,
+            adapter_identity=PatchResource.bind(adapter).identity,
+            gain_identity=PatchResource.bind(gain).identity,
+            strength=float(strength),
+            adapter=adapter,
+            hook_ref=hook_ref,
+        )
+
+    def clone(self):
+        return ScheduledBypassAdapter(
+            key=self.key,
+            adapter_identity=self.adapter_identity,
+            gain_identity=self.gain_identity,
+            strength=self.strength,
+            adapter=copy.deepcopy(self.adapter),
+            hook_ref=self.hook_ref,
+        )
+
+
+class ScheduledBypassMaterializer:
+    def create_handle(self, patcher, site, entry, scratch):
+        resource = entry.resources.value
+        module_key = resource.key.removesuffix(".weight")
+        module = patcher.model.get_submodule(module_key)
+
+        def active_multiplier(output):
+            if resource.hook_ref is None:
+                return resource.strength
+            if patcher.current_hooks is None:
+                return 0.0
+            for hook in patcher.current_hooks.hooks:
+                if hook.hook_ref is resource.hook_ref:
+                    return resource.strength * hook.tensor_gain_for(
+                        output,
+                        site=resource.key,
+                        transformer_options=patcher.current_transformer_options,
+                    )
+            return 0.0
+
+        return BypassForwardHook(
+            module,
+            resource.adapter,
+            multiplier_provider=active_multiplier,
+        )
+
+    def materialize(self, patcher, handle):
+        handle.inject()
+
+    def teardown(self, patcher, handle):
+        handle.eject()
 
 
 class BypassInjectionManager:
