@@ -66,17 +66,37 @@ class CompiledWindowField:
         return gather_window_tensor(self.tensor, self.layout, window)
 
 
-def gather_window_value(value, window: JointWindow):
+def _pack_primary_mask(mask: torch.Tensor, shapes: tuple[torch.Size, ...]) -> torch.Tensor:
+    primary = mask.unsqueeze(1).expand(mask.shape[0], shapes[0][1], *mask.shape[1:])
+    streams = [primary]
+    streams.extend(
+        torch.ones((mask.shape[0], *shape[1:]), dtype=mask.dtype, device=mask.device)
+        for shape in shapes[1:]
+    )
+    return utils.pack_latents(streams)[0].squeeze(1)
+
+
+def gather_window_value(
+    value,
+    window: JointWindow,
+    packed_shapes: tuple[torch.Size, ...] | None = None,
+):
     """Gather declared fields while preserving ordinary conditioning values."""
 
     if type(value) is CompiledWindowField:
-        return value.gather(window)
+        gathered = value.gather(window)
+        if packed_shapes is not None:
+            return _pack_primary_mask(gathered, packed_shapes)
+        return gathered
     if type(value) is dict:
-        return {key: gather_window_value(item, window) for key, item in value.items()}
+        return {
+            key: gather_window_value(item, window, packed_shapes)
+            for key, item in value.items()
+        }
     if type(value) is list:
-        return [gather_window_value(item, window) for item in value]
+        return [gather_window_value(item, window, packed_shapes) for item in value]
     if type(value) is tuple:
-        return tuple(gather_window_value(item, window) for item in value)
+        return tuple(gather_window_value(item, window, packed_shapes) for item in value)
     return value
 
 
@@ -321,10 +341,15 @@ class WindowPlanExecutor:
         outputs = [[] for _ in conds]
         for window in self.plan.joint_windows:
             sub_x = self._gather_latent(template, window)
-            sub_conds = gather_window_value(conds, window)
             sub_shapes = None
             if packed:
                 sub_x, sub_shapes = utils.pack_latents(sub_x.unbind())
+            sub_conds = gather_window_value(
+                conds,
+                window,
+                tuple(sub_shapes) if sub_shapes is not None else None,
+            )
+            if packed:
                 self._patch_latent_shapes(sub_conds, sub_shapes)
             sub_options = model_options.copy()
             transformer_options = model_options.get("transformer_options", {}).copy()

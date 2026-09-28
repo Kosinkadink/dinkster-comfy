@@ -353,6 +353,59 @@ def test_executor_unpacks_windows_and_repacks_sampler_latents():
     )
 
 
+def test_executor_packs_primary_effect_mask_for_multistream_conditioning():
+    temporal = MediaAxis("temporal", 3)
+    plan = compile_window_plan(
+        axes=(temporal,),
+        kinds=(
+            WindowKind(
+                "audio",
+                (KindAxisMap("temporal", 5, ProportionalRangeIndexMap()),),
+            ),
+            _kind("video", (temporal,)),
+        ),
+        layers=(_layer("temporal", ((0, 1), (1, 2))),),
+    )
+    executor = WindowPlanExecutor(
+        plan,
+        (
+            WindowTensorLayout("video", (("temporal", 2),)),
+            WindowTensorLayout("audio", (("temporal", 3),)),
+        ),
+    )
+    video = torch.zeros((1, 2, 3))
+    audio = torch.zeros((1, 3, 1, 5))
+    packed, shapes = utils.pack_latents((video, audio))
+
+    class Model:
+        latent_shapes = shapes
+
+    mask = torch.tensor([[0.25, 0.5, 0.75]])
+    conds = [[
+        {
+            "mask": executor.compile_mask(mask),
+            "model_conds": {"latent_shapes": CONDConstant(shapes)},
+            "uuid": "masked",
+        }
+    ]]
+    seen = []
+
+    def evaluate(model, sub_conds, sub_x, timestep, options):
+        del model, options
+        prepared = get_area_and_mult(sub_conds[0][0], sub_x, timestep)
+        seen.append(prepared.mult)
+        return [prepared.mult]
+
+    executor.execute(evaluate, Model(), conds, packed, torch.tensor([1.0]), {})
+
+    first_video, first_audio = utils.unpack_latents(seen[0], [
+        torch.Size((1, 2, 2)),
+        torch.Size((1, 3, 1, 3)),
+    ])
+    assert torch.equal(first_video, torch.tensor([[[0.25, 0.5], [0.25, 0.5]]]))
+    assert torch.equal(first_audio, torch.ones((1, 3, 1, 3)))
+
+
 def test_executor_merges_nested_streams_over_invariant_spatial_axes():
     temporal = MediaAxis("temporal", 2)
     height = MediaAxis("height", 2)
