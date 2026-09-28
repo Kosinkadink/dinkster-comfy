@@ -58,7 +58,9 @@ def get_area_and_mult(conds, x_in, timestep_in):
     if 'mask' in conds:
         # Scale the mask to the size of the input
         # The mask should have been resized as we began the sampling process
-        masks = gain_table.effect_masks if gain_table is not None and gain_table.effect_masks else (conds['mask'],)
+        masks = conds.get("window_effect_masks")
+        if masks is None:
+            masks = gain_table.effect_masks if gain_table is not None and gain_table.effect_masks else (conds['mask'],)
         mask = masks[0]
         for effect_mask in masks[1:]:
             mask = mask * effect_mask
@@ -1079,6 +1081,20 @@ def realize_contribution_gains(model, conds, sigmas):
                 hook.realize_gain(sigmas, model)
 
 
+def compile_window_masks(conds, window_plan):
+    for conditioning in conds.values():
+        for metadata in conditioning:
+            mask = metadata.get("mask")
+            if mask is None:
+                continue
+            metadata["mask"] = window_plan.compile_mask(mask)
+            gain = metadata.get("realized_contribution_gain")
+            if gain is not None and gain.effect_masks:
+                metadata["window_effect_masks"] = tuple(
+                    window_plan.compile_mask(effect_mask) for effect_mask in gain.effect_masks
+                )
+
+
 def preprocess_conds_hooks(conds: dict[str, list[dict[str]]]):
     # determine which ControlNets have extra_hooks that should be combined with normal hooks
     hook_replacement: dict[tuple[ControlBase, dinkster_comfy.hooks.HookGroup], list[dict]] = {}
@@ -1231,6 +1247,12 @@ class CFGGuider:
 
         self.conds = process_conds(self.inner_model, noise, self.conds, device, latent_image, denoise_mask, seed, latent_shapes=latent_shapes)
         realize_contribution_gains(self.inner_model, self.conds, sigmas)
+
+        window_plan = self.model_options.get("window_plan")
+        if window_plan is not None:
+            if type(window_plan) is not dinkster_comfy.window_execution.WindowPlanExecutor:
+                raise TypeError("model_options['window_plan'] must be a WindowPlanExecutor")
+            compile_window_masks(self.conds, window_plan)
 
         extra_model_options = dinkster_comfy.model_patcher.create_model_options_clone(self.model_options)
         extra_model_options.setdefault("transformer_options", {})["sample_sigmas"] = sigmas

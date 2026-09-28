@@ -11,6 +11,8 @@ from dinkster_comfy.context_windows import (
     get_matching_context_schedule,
     get_matching_fuse_method,
 )
+from dinkster_comfy.contribution_gain import ContributionGain
+from dinkster_comfy.samplers import compile_window_masks, get_area_and_mult
 from dinkster_comfy.window_execution import (
     CompiledWindowField,
     WindowPlanExecutor,
@@ -155,6 +157,65 @@ def test_executor_stacks_spatial_and_temporal_layers_and_gathers_masks_per_windo
 
     assert sorted(seen_masks) == [0.0, 0.25, 0.5, 1.0]
     assert torch.equal(result[0], x + mask.tensor)
+
+
+def test_conditioning_and_control_effect_masks_compile_once_and_gather_per_window():
+    temporal = MediaAxis("temporal", 2)
+    height = MediaAxis("height", 2)
+    plan = compile_window_plan(
+        axes=(temporal, height),
+        kinds=(_kind("latent", (temporal, height)),),
+        layers=(
+            _layer("temporal", ((0,), (1,))),
+            _layer("height", ((0,), (1,))),
+        ),
+    )
+    executor = WindowPlanExecutor(
+        plan,
+        WindowTensorLayout("latent", (("height", 2), ("temporal", 3))),
+    )
+    mask = torch.tensor([[[1.0, 0.5], [0.25, 0.0]]])
+    control_mask = torch.tensor([[[0.2, 0.4], [0.6, 0.8]]])
+    control = object()
+    gain = ContributionGain(effect_masks=(mask, control_mask)).realize(
+        torch.tensor([1.0, 0.0])
+    )
+    conds = [[
+        {
+            "control": control,
+            "mask": mask,
+            "model_conds": {},
+            "realized_contribution_gain": gain,
+            "uuid": "masked-control",
+        }
+    ]]
+    compile_window_masks({"positive": conds[0]}, executor)
+    assert type(conds[0][0]["mask"]) is CompiledWindowField
+    assert all(
+        type(value) is CompiledWindowField
+        for value in conds[0][0]["window_effect_masks"]
+    )
+    x = torch.zeros((1, 1, 2, 2))
+    seen = []
+
+    def evaluate(model, sub_conds, sub_x, timestep, options):
+        del model, options
+        prepared = get_area_and_mult(sub_conds[0][0], sub_x, timestep)
+        assert prepared.control is control
+        seen.append(prepared.mult.item())
+        return [prepared.mult]
+
+    result = executor.execute(
+        evaluate,
+        object(),
+        conds,
+        x,
+        torch.tensor([1.0]),
+        {},
+    )[0]
+
+    assert torch.allclose(torch.tensor(sorted(seen)), torch.tensor([0.0, 0.15, 0.2, 0.2]))
+    assert torch.allclose(result, (mask * control_mask).unsqueeze(1))
 
 
 def test_temporal_adapter_compiles_stock_context_schedule_without_raw_dimension_claims():

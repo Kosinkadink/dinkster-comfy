@@ -247,6 +247,20 @@ class WindowPlanExecutor:
             return self.latent_layout
         return ()
 
+    def compile_mask(self, tensor: torch.Tensor) -> CompiledWindowField:
+        """Compile a channel-free full-domain mask from the primary latent declaration."""
+
+        layout = self.layouts[0]
+        if any(dimension < 2 for _, dimension in layout.axis_dimensions):
+            raise ValueError("window masks require media axes after the latent channel dimension")
+        mask_layout = WindowTensorLayout(
+            layout.kind,
+            tuple((axis, dimension - 1) for axis, dimension in layout.axis_dimensions),
+        )
+        if any(dimension >= tensor.ndim for _, dimension in mask_layout.axis_dimensions):
+            raise ValueError("window mask does not contain every declared media axis")
+        return CompiledWindowField(tensor, mask_layout)
+
     def _gather_latent(self, value, window: JointWindow):
         if type(value) is NestedTensor:
             tensors = value.unbind()
