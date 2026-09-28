@@ -427,6 +427,24 @@ def test_module_insertion_clone_derives_without_changing_parent() -> None:
     assert parent.patch_program.digest != child.patch_program.digest
 
 
+def test_injected_clone_can_transition_shared_model() -> None:
+    events: list[str] = []
+    parent = _site_patcher()
+    parent.register_patch_materializer("test.module", _Materializer(events))
+    parent.set_module_insertions("motion", (_insertion("motion"),))
+    parent.inject_model()
+
+    child = parent.clone()
+    child.eject_model()
+    child.inject_model()
+
+    assert events == [
+        "materialize:motion:down_blocks.0",
+        "teardown:motion",
+        "materialize:motion:down_blocks.0",
+    ]
+
+
 def test_injections_use_structural_program_materialization() -> None:
     events: list[str] = []
     patcher = _site_patcher()

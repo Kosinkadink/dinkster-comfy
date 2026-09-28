@@ -713,6 +713,9 @@ def load_hook_lora_for_models(model: ModelPatcher, clip: CLIP, lora: dict[str, t
     hook = WeightHook()
     hook_group.add(hook)
     loaded: dict[str] = dinkster_comfy.lora.load_lora(lora, key_map)
+    hook.weights = loaded
+    hook.weights_clip = loaded
+    hook.need_weight_init = False
     if model is not None:
         new_modelpatcher = model.clone()
         k = new_modelpatcher.add_hook_patches(hook=hook, patches=loaded, strength_patch=strength_model)

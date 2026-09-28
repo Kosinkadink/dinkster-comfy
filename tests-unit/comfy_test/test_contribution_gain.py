@@ -1,16 +1,22 @@
 import pytest
 import torch
 
+import dinkster_comfy.float as float_module
+import dinkster_comfy.lora as lora_module
 import dinkster_comfy.model_patcher as model_patcher_module
+import dinkster_comfy.ops as ops_module
 from dinkster_comfy.contribution_gain import ContributionGain, GainKeyframe, GainTimeline
 from dinkster_comfy.controlnet import ControlBase
 from dinkster_comfy.hooks import (
+    EnumWeightTarget,
     Hook,
     HookGroup,
     HookKeyframe,
     HookKeyframeGroup,
     TransformerOptionsHook,
     WeightHook,
+    create_target_dict,
+    load_hook_lora_for_models,
 )
 from dinkster_comfy.model_patcher import HookWeightPatch, ModelPatcher
 from dinkster_comfy.samplers import realize_contribution_gains
@@ -146,21 +152,22 @@ def test_control_residual_uses_realized_global_site_lane_and_mask_gain():
     )
 
 
-def test_float_weight_overlay_reads_the_active_realized_hook_gain_per_call():
+def test_float_weight_overlay_matches_materialized_hook_without_mutating_base_weight():
     patcher = ModelPatcher(
         torch.nn.Linear(2, 2, bias=False),
         torch.device("cpu"),
         torch.device("cpu"),
     )
     hook = WeightHook()
-    hook.current_gain = 0.25
+    diff = torch.tensor([[0.10003, -0.20007], [0.30011, -0.40013]])
     patcher.hook_patches[hook.hook_ref] = {
         "weight": [
-            (1.0, ("diff", (torch.ones(2, 2),)), 1.0, None, None)
+            (1.0, ("diff", (diff,)), 1.0, None, None)
         ]
     }
     overlay = HookWeightPatch(patcher, "weight")
-    weight = torch.zeros(2, 2)
+    weight = torch.tensor([[1.0, -2.0], [3.0, -4.0]], dtype=torch.float16)
+    original = weight.clone()
 
     assert torch.equal(overlay(weight), weight)
 
@@ -168,7 +175,37 @@ def test_float_weight_overlay_reads_the_active_realized_hook_gain_per_call():
     active.add(hook)
     patcher.current_hooks = active
 
-    assert torch.equal(overlay(weight), torch.full((2, 2), 0.25))
+    hook.current_gain = 0.0
+    assert not overlay.active()
+    assert torch.equal(overlay(weight), original)
+
+    hook.current_gain = 1.0
+    assert overlay.active()
+    materialized = float_module.stochastic_rounding(
+        original.float() + diff,
+        original.dtype,
+    )
+    assert torch.equal(overlay(weight), materialized)
+    assert torch.equal(weight, original)
+
+
+def test_inactive_float_weight_overlay_preserves_resident_weight() -> None:
+    model = ops_module.disable_weight_init.Linear(2, 2, bias=False)
+    model.weight.data.copy_(torch.tensor([[1.0, -2.0], [3.0, -4.0]]))
+    patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+    hook = WeightHook()
+    patcher.hook_patches[hook.hook_ref] = {
+        "weight": [(1.0, ("diff", (torch.ones(2, 2),)), 1.0, None, None)]
+    }
+    active = HookGroup()
+    active.add(hook)
+    patcher.current_hooks = active
+    hook.current_gain = 0.0
+    model.weight_function = [HookWeightPatch(patcher, "weight")]
+
+    weight, _ = ops_module.cast_bias_weight(model, dtype=model.weight.dtype, device=model.weight.device)
+
+    assert weight.data_ptr() == model.weight.data_ptr()
 
 
 def test_float_weight_overlay_is_not_baked_before_model_load():
@@ -188,6 +225,69 @@ def test_float_weight_overlay_is_not_baked_before_model_load():
 
     assert patcher.hook_weight_function_keys == {"weight"}
     assert torch.equal(model.weight, torch.zeros(2, 2))
+
+
+def test_loaded_lora_hook_carries_reusable_patches(monkeypatch):
+    model = torch.nn.Linear(2, 2, bias=False)
+    patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+    patch = ("diff", (torch.ones(2, 2),))
+    load_calls = []
+    monkeypatch.setattr(
+        lora_module,
+        "model_lora_keys_unet",
+        lambda model, key_map: key_map,
+    )
+
+    def load_lora(lora, key_map, log_missing=True):
+        load_calls.append(lora)
+        return {"weight": patch}
+
+    monkeypatch.setattr(lora_module, "load_lora", load_lora)
+
+    loaded, _, hooks = load_hook_lora_for_models(
+        patcher,
+        None,
+        {"source": torch.ones(1)},
+        strength_model=1.0,
+        strength_clip=0.0,
+    )
+    hook = hooks.hooks[0]
+    loaded.hook_patches.clear()
+
+    registered = HookGroup()
+    hook.add_hook_patches(
+        loaded,
+        {},
+        create_target_dict(EnumWeightTarget.Model),
+        registered,
+    )
+
+    assert load_calls == [{"source": torch.ones(1)}]
+    assert loaded.hook_patches[hook.hook_ref]["weight"][0][1] == patch
+    assert registered.contains(hook)
+
+
+def test_hook_patching_does_not_reload_unrelated_virtual_state_keys():
+    class VirtualStateLinear(torch.nn.Linear):
+        def state_dict(self, *args, **kwargs):
+            state = super().state_dict(*args, **kwargs)
+            state["weight_scale"] = torch.tensor(0.5)
+            return state
+
+    model = VirtualStateLinear(2, 2, bias=False)
+    model.weight.data.zero_()
+    patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+    hook = WeightHook()
+    patcher.add_hook_patches(
+        hook,
+        {"weight": ("diff", (torch.ones(2, 2),))},
+    )
+    active = HookGroup()
+    active.add(hook)
+
+    patcher.patch_hooks(active)
+
+    assert torch.equal(model.weight, torch.ones(2, 2))
 
 
 class _BypassAdapter(WeightAdapterBase):
