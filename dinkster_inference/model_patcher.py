@@ -2130,6 +2130,26 @@ class ModelPatcherDynamic(ModelPatcher):
     def is_dynamic(self):
         return True
 
+    def _install_hook_weight_functions(self):
+        for key in self.get_hook_patch_keys():
+            module_key, separator, parameter = key.rpartition(".")
+            if not separator:
+                module_key = ""
+            functions = f"{parameter}_function"
+            module = self.model if not module_key else self.model.get_submodule(module_key)
+            weight = getattr(module, parameter, None)
+            if not hasattr(module, functions) or isinstance(weight, QuantizedTensor):
+                continue
+            weight_functions = getattr(module, functions)
+            if not any(isinstance(function, HookWeightPatch) and function.key == key for function in weight_functions):
+                weight_functions.append(HookWeightPatch(self, key))
+            self.hook_weight_function_keys.add(key)
+
+    def add_hook_patches(self, hook: dinkster_inference.hooks.WeightHook, patches, strength_patch=1.0, strength_model=1.0):
+        added = super().add_hook_patches(hook, patches, strength_patch, strength_model)
+        self._install_hook_weight_functions()
+        return added
+
     def set_in_use_by_current_prompt(self, in_use):
         self.model.dynamic_pins[self.load_device]["current_prompt"] = in_use
 
