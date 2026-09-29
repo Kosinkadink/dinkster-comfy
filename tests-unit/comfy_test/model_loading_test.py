@@ -2,7 +2,20 @@ from unittest import mock
 
 import torch
 
+import dinkster_inference.model_patcher
 import dinkster_inference.sd
+
+
+def test_model_patcher_can_leave_mapped_offload_weights_unpinned():
+    patcher = dinkster_inference.model_patcher.ModelPatcher(
+        torch.nn.Linear(1, 1), torch.device("cpu"), torch.device("cpu")
+    )
+    patcher.pin_offloaded_weights = False
+
+    with mock.patch.object(dinkster_inference.model_patcher, "get_key_weight") as get_weight:
+        patcher.pin_weight_to_device("weight")
+
+    get_weight.assert_not_called()
 
 
 def test_assign_loaded_weights_preserves_mmap_storage(tmp_path):
@@ -31,6 +44,7 @@ def test_assign_loaded_weights_preserves_mmap_storage(tmp_path):
     class Patcher:
         def __init__(self, model, **_kwargs):
             self.model = model
+            self.pin_offloaded_weights = True
 
         def is_dynamic(self):
             return False
@@ -87,6 +101,8 @@ def test_assign_loaded_weights_preserves_mmap_storage(tmp_path):
     assert copied.model.diffusion_model.weight.untyped_storage().data_ptr() != (
         source.untyped_storage().data_ptr()
     )
+    assert copied.pin_offloaded_weights is True
     assert assigned.model.diffusion_model.weight.untyped_storage().data_ptr() == (
         source.untyped_storage().data_ptr()
     )
+    assert assigned.pin_offloaded_weights is False

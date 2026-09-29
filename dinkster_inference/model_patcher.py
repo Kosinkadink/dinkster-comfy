@@ -433,6 +433,7 @@ class ModelPatcher:
         self.offload_device = offload_device
         self.weight_inplace_update = weight_inplace_update
         self.force_cast_weights = False
+        self.pin_offloaded_weights = True
         self.patches_uuid = uuid.uuid4()
         self.parent = None
         self.pinned = set()
@@ -535,6 +536,7 @@ class ModelPatcher:
         n.parent = self
 
         n.force_cast_weights = self.force_cast_weights
+        n.pin_offloaded_weights = self.pin_offloaded_weights
 
         n.backup, n.backup_buffers, n.object_patches_backup, n.pinned = model_override[1]
 
@@ -1109,6 +1111,8 @@ class ModelPatcher:
             return set_func(out_weight, inplace_update=inplace_update, seed=dinkster_inference.utils.string_to_seed(key), return_weight=return_weight)
 
     def pin_weight_to_device(self, key):
+        if not self.pin_offloaded_weights:
+            return
         weight, set_func, convert_func = get_key_weight(self.model, key)
         if dinkster_inference.model_management.pin_memory(weight):
             self.pinned.add(key)
