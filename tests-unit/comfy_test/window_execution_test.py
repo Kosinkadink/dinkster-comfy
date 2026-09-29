@@ -14,7 +14,7 @@ from dinkster_inference.context_windows import (
 from dinkster_inference.conds import CONDConstant
 from dinkster_inference.contribution_gain import ContributionGain
 from dinkster_inference.samplers import compile_window_masks, get_area_and_mult
-from dinkster_inference import utils
+from dinkster_inference import patcher_extension, utils
 from dinkster_inference.window_execution import (
     CompiledWindowField,
     WindowPlanExecutor,
@@ -159,6 +159,55 @@ def test_executor_stacks_spatial_and_temporal_layers_and_gathers_masks_per_windo
 
     assert sorted(seen_masks) == [0.0, 0.25, 0.5, 1.0]
     assert torch.equal(result[0], x + mask.tensor)
+
+
+def test_window_execute_wrapper_can_distribute_evaluation_without_changing_merge_order():
+    temporal = MediaAxis("temporal", 3)
+    plan = compile_window_plan(
+        axes=(temporal,),
+        kinds=(_kind("latent", (temporal,)),),
+        layers=(_layer("temporal", ((0,), (1,), (2,))),),
+    )
+    window_executor = WindowPlanExecutor(
+        plan,
+        WindowTensorLayout("latent", (("temporal", 2),)),
+    )
+    visited = []
+
+    def evaluate(model, conds, sub_x, timestep, options):
+        del model, conds, timestep
+        index = options["transformer_options"]["window"].index
+        visited.append(index)
+        return [sub_x + index + 1]
+
+    def reverse_windows(executor, evaluate, model, conds, template, timestep, options, packed):
+        outputs = [[None] * len(executor.class_obj.plan.joint_windows) for _ in conds]
+        for index in reversed(range(len(executor.class_obj.plan.joint_windows))):
+            values = executor.class_obj.evaluate_window(
+                index, evaluate, model, conds, template, timestep, options, packed
+            )
+            for condition_index, value in enumerate(values):
+                outputs[condition_index][index] = value
+        return outputs
+
+    model_options = {}
+    patcher_extension.add_wrapper(
+        patcher_extension.WrappersMP.WINDOW_EXECUTE,
+        reverse_windows,
+        model_options,
+        is_model_options=True,
+    )
+    result = window_executor.execute(
+        evaluate,
+        object(),
+        [[{}]],
+        torch.zeros((1, 1, 3)),
+        torch.tensor([1.0]),
+        model_options,
+    )
+
+    assert visited == [2, 1, 0]
+    assert torch.equal(result[0], torch.tensor([[[1.0, 2.0, 3.0]]]))
 
 
 def test_conditioning_and_control_effect_masks_compile_once_and_gather_per_window():

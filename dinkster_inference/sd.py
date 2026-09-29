@@ -2398,9 +2398,12 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
     model = model_config.get_model(new_sd, "")
     ModelPatcher = dinkster_inference.model_patcher.ModelPatcher if disable_dynamic else dinkster_inference.model_patcher.CoreModelPatcher
     model_patcher = ModelPatcher(model, load_device=load_device, offload_device=offload_device, fast_disk=dinkster_inference.storage.state_dict_fast_disk(new_sd))
+    assign_loaded_weights = model_options.get("assign_loaded_weights", False)
+    if assign_loaded_weights:
+        model_patcher.pin_offloaded_weights = False
     if not model_management.is_device_cpu(offload_device):
         model.to(offload_device)
-    model.load_model_weights(new_sd, "", assign=model_patcher.is_dynamic())
+    model.load_model_weights(new_sd, "", assign=model_patcher.is_dynamic() or assign_loaded_weights)
     left_over = sd.keys()
     if len(left_over) > 0:
         logging.info("left over keys in diffusion model: {}".format(left_over))
