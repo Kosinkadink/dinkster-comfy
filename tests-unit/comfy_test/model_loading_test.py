@@ -12,7 +12,9 @@ def test_model_patcher_can_leave_mapped_offload_weights_unpinned():
     )
     patcher.pin_offloaded_weights = False
 
-    with mock.patch.object(dinkster_inference.model_patcher, "get_key_weight") as get_weight:
+    with mock.patch.object(
+        dinkster_inference.model_patcher, "get_key_weight"
+    ) as get_weight:
         patcher.pin_weight_to_device("weight")
 
     get_weight.assert_not_called()

@@ -138,7 +138,8 @@ def test_chunked_sol_attention_projects_bounded_h3_slices(monkeypatch):
 
     monkeypatch.setattr(attention.comfy_kitchen, "sol_attn_chunked", sol_attn_chunked)
     selected = attention.get_attention_function(
-        "comfy_kitchen_sol_chunked", registry=attention.create_attention_function_registry()
+        "comfy_kitchen_sol_chunked",
+        registry=attention.create_attention_function_registry(),
     )
     x = torch.zeros((4097, 8))
     rope = object()
