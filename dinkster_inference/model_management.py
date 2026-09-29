@@ -155,7 +155,15 @@ try:
 except:
     ixuca_available = False
 
-if args.cpu:
+if args.cpu or (
+    cpu_state == CPUState.GPU
+    and not directml_enabled
+    and not torch.cuda.is_available()
+    and not xpu_available
+    and not npu_available
+    and not mlu_available
+    and not ixuca_available
+):
     cpu_state = CPUState.CPU
 
 def is_intel_xpu():
