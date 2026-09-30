@@ -314,7 +314,8 @@ def test_causal_memory_cache_offload_round_trips_across_slices():
     next slice reads them (which the one-ahead prefetch assumes), and free() unpins the host buffers."""
     keys = [f"conv{i}" for i in range(6)]
     tails = {k: _cache_tail(128) for k in keys}
-    pinned_before = vae_mod.dinkster_inference.model_management.TOTAL_PINNED_MEMORY
+    manager = vae_mod.dinkster_inference.model_management.get_model_manager()
+    pinned_before = manager.total_pinned_memory
     resident = _AlwaysPackedCache()
     offloaded = _AlwaysPackedCache(offload=True)
     for slice_idx in range(3):
@@ -328,7 +329,7 @@ def test_causal_memory_cache_offload_round_trips_across_slices():
             assert torch.equal(a, b), f"{k} slice {slice_idx}: offloaded tail differs"
     assert offloaded.pop("conv0") is not None and "conv0" not in offloaded
     offloaded.free()
-    assert vae_mod.dinkster_inference.model_management.TOTAL_PINNED_MEMORY == pinned_before
+    assert manager.total_pinned_memory == pinned_before
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="offload moves tails between CUDA and host memory")
