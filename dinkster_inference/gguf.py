@@ -337,8 +337,13 @@ class GGUFBalancedResidency:
         self.baseline_bytes = None
         self.decoded_bytes = 0
         self.growth_bytes = 0
+        self.loaded_memory_target = -1
 
     def on_model_load_target(self, model_patcher, loaded_memory_target):
+        target = float("inf") if loaded_memory_target == 0 else loaded_memory_target
+        if target <= self.loaded_memory_target:
+            return
+        self.loaded_memory_target = target
         if self.baseline_bytes is None:
             self.baseline_bytes = model_patcher.model_size()
         growth_budget = None
