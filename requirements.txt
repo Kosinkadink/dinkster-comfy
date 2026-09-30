@@ -9,7 +9,9 @@ einops
 transformers>=4.50.3
 tokenizers>=0.13.3
 sentencepiece
+protobuf
 safetensors>=0.4.2
+gguf>=0.13.0
 aiohttp>=3.11.8
 yarl>=1.18.0
 pyyaml
