@@ -9,7 +9,7 @@ from torchvision.ops import roi_align
 
 from dinkster_inference.ldm.modules.attention import optimized_attention
 from dinkster_inference.ldm.sam3.tracker import SAM3Tracker, SAM31Tracker
-from dinkster_inference.ldm.sam3.sam import SAM3VisionBackbone  # noqa: used in __init__
+from dinkster_inference.ldm.sam3.sam import SAM3VisionBackbone
 from dinkster_inference.ldm.sam3.sam import MLP, PositionEmbeddingSine
 
 TRACKER_CLASSES = {"SAM3": SAM3Tracker, "SAM31": SAM31Tracker}
