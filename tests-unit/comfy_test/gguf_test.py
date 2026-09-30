@@ -290,6 +290,11 @@ def test_balanced_residency_does_not_grow_past_loaded_memory_target():
     )
     assert isinstance(constrained.model.weight, GGUFWeightTensor)
     assert constrained.attachments["gguf"].decoded_weight_bytes == 0
+    constrained.attachments["gguf_balanced_residency"].on_model_load_target(
+        constrained, baseline + 60
+    )
+    assert not isinstance(constrained.model.weight, GGUFWeightTensor)
+    assert constrained.attachments["gguf"].decoded_weight_bytes == 128
 
     admitted = make_patcher()
     admitted.attachments["gguf_balanced_residency"].on_model_load_target(
