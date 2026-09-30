@@ -26,6 +26,14 @@ jobs:
       REPOSITORY: ${{ github.repository }}
       DRY_RUN: ${{ inputs.dry_run || false }}
     steps:
+      - name: Validate bot token
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::RELEASE_BOT_TOKEN is not set."
+            exit 1
+          fi
+
       - uses: actions/checkout@v4
         with:
           ref: main
@@ -35,14 +43,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Validate bot token
-        run: |
-          set -euo pipefail
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::error::RELEASE_BOT_TOKEN is not set."
-            exit 1
-          fi
 
       - name: Configure repository and labels
         run: |
