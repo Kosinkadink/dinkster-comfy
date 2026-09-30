@@ -11,6 +11,8 @@ import gguf
 import torch
 from sentencepiece import sentencepiece_model_pb2
 
+from . import utils
+
 
 class GGUFError(ValueError):
     pass
@@ -325,6 +327,49 @@ def _decoded_budget(load_device, encoded_bytes):
 
     free = model_management.get_free_memory(load_device)
     return max(0, int(free - model_management.minimum_inference_memory() - encoded_bytes))
+
+
+class GGUFBalancedResidency:
+    def __init__(self, info, decoded_dtype, decoded_budget_bytes):
+        self.info = info
+        self.decoded_dtype = decoded_dtype
+        self.decoded_budget_bytes = decoded_budget_bytes
+        self.applied = False
+
+    def on_model_load_target(self, model_patcher, loaded_memory_target):
+        if self.applied:
+            return
+        self.applied = True
+        baseline_bytes = model_patcher.model_size()
+        growth_budget = None
+        if loaded_memory_target > 0:
+            growth_budget = max(0, int(loaded_memory_target - baseline_bytes))
+
+        decoded_bytes = 0
+        growth_bytes = 0
+        for name, parameter in model_patcher.model.named_parameters():
+            if not is_encoded_gguf_tensor(parameter):
+                continue
+            decoded_size = parameter.shape.numel() * torch.empty(
+                (), dtype=self.decoded_dtype
+            ).element_size()
+            growth = decoded_size - parameter.nbytes
+            if decoded_bytes + decoded_size > self.decoded_budget_bytes:
+                continue
+            if growth_budget is not None and growth_bytes + growth > growth_budget:
+                continue
+            decoded = decode_gguf_tensor(parameter, dtype=self.decoded_dtype)
+            utils.set_attr_param(model_patcher.model, name, decoded)
+            decoded_bytes += decoded_size
+            growth_bytes += growth
+
+        model_patcher.size = 0
+        info = replace(
+            self.info,
+            decoded_weight_bytes=decoded_bytes,
+        )
+        self.info = info
+        model_patcher.attachments["gguf"] = info
 
 
 def apply_gguf_residency(

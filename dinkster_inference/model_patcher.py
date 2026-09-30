@@ -1183,6 +1183,10 @@ class ModelPatcher:
         return loading
 
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False):
+        for attachment in self.attachments.values():
+            callback = getattr(attachment, "on_model_load_target", None)
+            if callback is not None:
+                callback(self, lowvram_model_memory)
         self._validate_patch_program()
         with self.use_ejected():
             self.unpatch_hooks()
@@ -2214,6 +2218,10 @@ class ModelPatcherDynamic(ModelPatcher):
 
 
     def load(self, device_to=None, lowvram_model_memory=0, force_patch_weights=False, full_load=False, dirty=False):
+        for attachment in self.attachments.values():
+            callback = getattr(attachment, "on_model_load_target", None)
+            if callback is not None:
+                callback(self, lowvram_model_memory)
         self._validate_patch_program()
 
         #Force patching doesn't make sense in Dynamic loading, as you dont know what does and
