@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import dinkster_inference
-from dinkster_inference.ldm.modules.attention import optimized_attention
+from dinkster_inference.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention
 from dinkster_inference.ldm.flux.math import apply_rope1
 from dinkster_inference.ldm.flux.layers import EmbedND
 
@@ -12,6 +12,7 @@ class MusicSelfAttention(nn.Module):
     def __init__(self, dim, num_heads, device=None, dtype=None, operations=None):
         assert dim % num_heads == 0
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.embed_dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
@@ -30,11 +31,13 @@ class MusicSelfAttention(nn.Module):
         k = self.k_proj(x).view(b, s, n, d)
         k = apply_rope1(k, freqs)
 
+        q = AttentionTensorContainer(q.view(b, s, n * d))
+        k = AttentionTensorContainer(k.view(b, s, n * d))
+        v = AttentionTensorContainer(self.v_proj(x).view(b, s, n * d))
         x = optimized_attention(
-            q.view(b, s, n * d),
-            k.view(b, s, n * d),
-            self.v_proj(x).view(b, s, n * d),
+            q, k, v,
             heads=self.num_heads,
+            preferred_attention=self.comfy_attention,
         )
 
         return self.out_proj(x)
@@ -141,7 +144,7 @@ class WanDancerModel(WanModel):
         context = self.text_embedding(context)
 
         audio_emb = None
-        if audio_embed is not None: # encode music feature，[1, frame_num, 35] -> [1, F*8, dim]
+        if audio_embed is not None: # encode music feature, [1, frame_num, 35] -> [1, F*8, dim]
             music_feature = self.music_projection(audio_embed)
 
             music_seq_len = music_feature.shape[1]
