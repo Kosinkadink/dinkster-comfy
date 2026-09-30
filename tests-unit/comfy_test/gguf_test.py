@@ -281,25 +281,38 @@ def test_residency_modes_share_one_loader_and_obey_decoded_budget(tmp_path):
 
     memory, memory_info = load_gguf_state_dict(path, residency_mode="memory")
     refused, refused_info = load_gguf_state_dict(
-        path, residency_mode="balanced", decoded_budget_bytes=127
+        path, residency_mode="balanced", decoded_budget_bytes=63, decoded_dtype=torch.float16
     )
     balanced, balanced_info = load_gguf_state_dict(
-        path, residency_mode="balanced", decoded_budget_bytes=128
+        path, residency_mode="balanced", decoded_budget_bytes=64, decoded_dtype=torch.float16
     )
-    eager, eager_info = load_gguf_state_dict(path, residency_mode="eager")
+    eager, eager_info = load_gguf_state_dict(
+        path, residency_mode="eager", decoded_dtype=torch.float16
+    )
 
     assert isinstance(memory["test.weight"], GGUFWeightTensor)
     assert isinstance(refused["test.weight"], GGUFWeightTensor)
     assert torch.equal(balanced["test.weight"], eager["test.weight"])
+    assert balanced["test.weight"].dtype == eager["test.weight"].dtype == torch.float16
     assert memory_info.decoded_weight_bytes == refused_info.decoded_weight_bytes == 0
-    assert balanced_info.decoded_weight_bytes == eager_info.decoded_weight_bytes == 128
-    assert balanced_info.decoded_budget_bytes == 128
+    assert balanced_info.decoded_weight_bytes == eager_info.decoded_weight_bytes == 64
+    assert balanced_info.decoded_budget_bytes == 64
     assert memory_info.encoded_weight_bytes == 34
 
 
 def test_loader_rejects_unknown_mode_before_reading():
     with pytest.raises(GGUFError, match="unknown GGUF residency mode"):
         load_gguf_state_dict("absent.gguf", residency_mode="fast")
+
+
+def test_loader_admits_flux_diffusion_architecture(tmp_path):
+    path = tmp_path / "flux.gguf"
+    _write_q8(path, architecture="flux")
+
+    state_dict, info = load_gguf_state_dict(path)
+
+    assert info.architecture == "flux"
+    assert isinstance(state_dict["test.weight"], GGUFWeightTensor)
 
 
 def test_diffusion_loader_dispatches_gguf_without_changing_safetensors_route():
@@ -332,8 +345,7 @@ def test_diffusion_loader_dispatches_gguf_without_changing_safetensors_route():
 
     load_gguf.assert_called_once_with(
         "model.gguf",
-        residency_mode="balanced",
-        decoded_budget_bytes=128,
+        residency_mode="memory",
         load_device=None,
     )
     load_safe.assert_called_once_with("model.safetensors", return_metadata=True)
@@ -363,6 +375,12 @@ def test_clip_loader_dispatches_gguf_without_changing_safetensors_route():
             "load_text_encoder_state_dicts",
             side_effect=(gguf_clip, safe_clip),
         ) as load_state,
+        mock.patch.object(
+            sd.model_management, "text_encoder_device", return_value=torch.device("cpu")
+        ),
+        mock.patch.object(
+            sd.model_management, "text_encoder_dtype", return_value=torch.bfloat16
+        ),
     ):
         assert sd.load_clip(["encoder.gguf"]) is gguf_clip
         assert sd.load_clip(["encoder.safetensors"]) is safe_clip
@@ -373,6 +391,7 @@ def test_clip_loader_dispatches_gguf_without_changing_safetensors_route():
         residency_mode="memory",
         decoded_budget_bytes=None,
         load_device=None,
+        decoded_dtype=torch.bfloat16,
     )
     load_safe.assert_called_once_with(
         "encoder.safetensors", safe_load=True, return_metadata=True

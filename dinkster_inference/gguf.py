@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 import gguf
@@ -206,7 +206,7 @@ class GGUFLoadInfo:
     metadata: dict[str, object]
 
 
-_IMAGE_ARCHITECTURES = frozenset({"sdxl"})
+_IMAGE_ARCHITECTURES = frozenset({"flux", "sdxl"})
 _TEXT_ARCHITECTURES = frozenset({"t5", "t5encoder"})
 _T5_REPLACEMENTS = {
     "enc.": "encoder.",
@@ -327,6 +327,56 @@ def _decoded_budget(load_device, encoded_bytes):
     return max(0, int(free - model_management.minimum_inference_memory() - encoded_bytes))
 
 
+def apply_gguf_residency(
+    state_dict,
+    info,
+    *,
+    residency_mode,
+    decoded_dtype,
+    decoded_budget_bytes=None,
+    load_device=None,
+):
+    if residency_mode not in GGUF_RESIDENCY_MODES:
+        raise GGUFError(
+            f"unknown GGUF residency mode {residency_mode!r}; expected one of {GGUF_RESIDENCY_MODES}"
+        )
+    if decoded_budget_bytes is not None and (
+        type(decoded_budget_bytes) is not int or decoded_budget_bytes < 0
+    ):
+        raise GGUFError("decoded GGUF budget must be a non-negative byte count")
+
+    element_size = torch.empty((), dtype=decoded_dtype).element_size()
+    decoded_sizes = {
+        key: value.tensor_shape.numel() * element_size
+        for key, value in state_dict.items()
+        if is_encoded_gguf_tensor(value)
+    }
+    if residency_mode == "memory":
+        budget = 0
+    elif residency_mode == "eager":
+        budget = sum(decoded_sizes.values())
+    elif decoded_budget_bytes is None:
+        if load_device is None:
+            from . import model_management
+
+            load_device = model_management.get_torch_device()
+        budget = _decoded_budget(load_device, info.encoded_weight_bytes)
+    else:
+        budget = decoded_budget_bytes
+
+    decoded = 0
+    for key, decoded_size in decoded_sizes.items():
+        if decoded + decoded_size <= budget:
+            state_dict[key] = decode_gguf_tensor(state_dict[key], dtype=decoded_dtype)
+            decoded += decoded_size
+    return state_dict, replace(
+        info,
+        residency_mode=residency_mode,
+        decoded_budget_bytes=budget,
+        decoded_weight_bytes=decoded,
+    )
+
+
 def load_gguf_state_dict(
     path,
     *,
@@ -334,6 +384,7 @@ def load_gguf_state_dict(
     residency_mode="memory",
     decoded_budget_bytes=None,
     load_device=None,
+    decoded_dtype=torch.float32,
 ):
     if residency_mode not in GGUF_RESIDENCY_MODES:
         raise GGUFError(
@@ -378,30 +429,12 @@ def load_gguf_state_dict(
             raise GGUFError(f"unsupported GGML type {type_name!r} for tensor {tensor.name!r}")
         tensors.append((key, value))
 
-    if residency_mode == "memory":
-        budget = 0
-    elif residency_mode == "eager":
-        budget = sum(value.shape.numel() * 4 for _, value in tensors if is_encoded_gguf_tensor(value))
-    elif decoded_budget_bytes is None:
-        if load_device is None:
-            from . import model_management
-
-            load_device = model_management.get_torch_device()
-        budget = _decoded_budget(load_device, encoded_total)
-    else:
-        budget = decoded_budget_bytes
-
     state_dict = {}
-    decoded = 0
     quant_counts = {}
     for key, value in tensors:
         if is_encoded_gguf_tensor(value):
             type_name = value.ggml_type.name
             quant_counts[type_name] = quant_counts.get(type_name, 0) + 1
-            decoded_size = value.tensor_shape.numel() * 4
-            if decoded + decoded_size <= budget:
-                value = decode_gguf_tensor(value)
-                decoded += decoded_size
         state_dict[key] = value
     if text_model:
         state_dict["spiece_model"] = _umt5_tokenizer(reader)
@@ -412,10 +445,17 @@ def load_gguf_state_dict(
     )
     info = GGUFLoadInfo(
         architecture=architecture,
-        residency_mode=residency_mode,
-        decoded_budget_bytes=budget,
-        decoded_weight_bytes=decoded,
+        residency_mode="memory",
+        decoded_budget_bytes=0,
+        decoded_weight_bytes=0,
         encoded_weight_bytes=encoded_total,
         metadata=_metadata(reader),
     )
-    return state_dict, info
+    return apply_gguf_residency(
+        state_dict,
+        info,
+        residency_mode=residency_mode,
+        decoded_dtype=decoded_dtype,
+        decoded_budget_bytes=decoded_budget_bytes,
+        load_device=load_device,
+    )

@@ -59,7 +59,8 @@ class GGUFLayer:
         tensor = tensor.to(device=device, non_blocking=model_management.device_supports_non_blocking(device))
         if is_encoded_gguf_tensor(tensor):
             tensor = decode_gguf_tensor(tensor, dtype=dtype)
-        tensor = tensor.to(dtype=dtype)
+        elif tensor.dtype != dtype:
+            tensor = tensor.to(dtype=dtype)
         for function in _active(functions):
             tensor = function(tensor)
         return tensor
