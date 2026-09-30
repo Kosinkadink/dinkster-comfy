@@ -215,7 +215,8 @@ def calculate_parameters(sd, prefix=""):
     for k in sd.keys():
         if k.startswith(prefix):
             w = sd[k]
-            params += w.nelement()
+            shape = getattr(w, "tensor_shape", None)
+            params += shape.numel() if shape is not None else w.nelement()
     return params
 
 def weight_dtype(sd, prefix=""):
@@ -223,7 +224,8 @@ def weight_dtype(sd, prefix=""):
     for k in sd.keys():
         if k.startswith(prefix):
             w = sd[k]
-            dtypes[w.dtype] = dtypes.get(w.dtype, 0) + w.numel()
+            shape = getattr(w, "tensor_shape", None)
+            dtypes[w.dtype] = dtypes.get(w.dtype, 0) + (shape.numel() if shape is not None else w.numel())
 
     if len(dtypes) == 0:
         return None

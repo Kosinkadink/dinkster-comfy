@@ -184,7 +184,7 @@ class BypassForwardHook:
             return output
         return base_out + (output - base_out) * self.multiplier_provider(output)
 
-    def inject(self):
+    def inject(self, device=None):
         """Replace module forward with bypass version."""
         if self.original_forward is not None:
             logging.debug(
@@ -192,10 +192,8 @@ class BypassForwardHook:
             )
             return  # Already injected
 
-        # Move adapter weights to compute device (GPU)
-        # Use get_torch_device() instead of module.weight.device because
-        # with offloading, module weights may be on CPU while compute happens on GPU
-        device = dinkster_inference.model_management.get_torch_device()
+        if device is None:
+            device = dinkster_inference.model_management.get_torch_device()
 
         # Get dtype from module weight if available
         dtype = None
@@ -329,7 +327,7 @@ class ScheduledBypassMaterializer:
         )
 
     def materialize(self, patcher, handle):
-        handle.inject()
+        handle.inject(patcher.load_device)
 
     def teardown(self, patcher, handle):
         handle.eject()
@@ -454,7 +452,7 @@ class BypassInjectionManager:
                 f"[BypassManager] inject_all called, injecting {len(self.hooks)} hooks"
             )
             for hook in self.hooks:
-                hook.inject()
+                hook.inject(model_patcher.load_device)
                 logging.debug(
                     f"[BypassManager] Injected hook for {type(hook.module).__name__}"
                 )

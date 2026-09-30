@@ -18,6 +18,7 @@ dependencies = [
   "transformers>=4.50.3",
   "tokenizers>=0.13.3",
   "sentencepiece",
+  "protobuf",
   "safetensors>=0.4.2",
   "aiohttp>=3.11.8",
   "yarl>=1.18.0",
@@ -39,6 +40,7 @@ dependencies = [
   "pydantic-settings~=2.0",
   "PyOpenGL>=3.1.8",
   "comfy-angle",
+  "gguf>=0.13.0",
 ]
 
 [project.urls]

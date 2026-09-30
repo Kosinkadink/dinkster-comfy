@@ -35,7 +35,7 @@ def main() -> None:
         files = (root.rglob("*.py") if root.is_dir() else (root,))
         for path in files:
             changed += rewrite(path)
-    print(f"rewrote {changed} files")
+    print(f"rewrote {changed} files")  # noqa: T201
 
 
 if __name__ == "__main__":

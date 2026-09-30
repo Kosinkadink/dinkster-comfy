@@ -485,10 +485,14 @@ def test_injections_use_structural_program_materialization() -> None:
     assert patcher.get_injections("test") is None
 
 
-def test_bypass_adapter_injection_materializes_and_restores_forward() -> None:
+def test_bypass_adapter_injection_materializes_and_restores_forward(monkeypatch) -> None:
     model = torch.nn.Module()
     model.layer = torch.nn.Linear(2, 2, bias=False)
     patcher = ModelPatcher(model, torch.device("cpu"), torch.device("cpu"))
+    monkeypatch.setattr(
+        "dinkster_inference.model_management.get_torch_device",
+        lambda: torch.device("meta"),
+    )
     adapter = LoRAAdapter.create_train(model.layer.weight, rank=1, alpha=1.0)
     adapter.lora_up.weight.data.fill_(1.0)
     adapter.lora_down.weight.data.fill_(1.0)

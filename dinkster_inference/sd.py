@@ -35,6 +35,8 @@ import os
 
 import dinkster_inference.utils
 import dinkster_inference.ops
+import dinkster_inference.gguf
+import dinkster_inference.gguf_ops
 import dinkster_inference.model_prefetch
 import dinkster_inference.storage
 
@@ -1607,12 +1609,33 @@ def load_clip_model_patcher(ckpt_paths, embedding_directory=None, clip_type=CLIP
 
 def load_clip(ckpt_paths, embedding_directory=None, clip_type=CLIPType.STABLE_DIFFUSION, model_options={}, disable_dynamic=False):
     clip_data = []
+    gguf_info = []
+    load_device = model_options.get("load_device", model_management.text_encoder_device())
+    decoded_dtype = model_options.get("dtype")
+    if decoded_dtype is None:
+        decoded_dtype = model_management.text_encoder_dtype(load_device)
     for p in ckpt_paths:
-        sd, metadata = dinkster_inference.utils.load_torch_file(p, safe_load=True, return_metadata=True)
+        if p.lower().endswith(".gguf"):
+            if not gguf_info:
+                model_options = model_options.copy()
+                model_options["custom_operations"] = dinkster_inference.gguf_ops.GGUFOps
+            sd, info = dinkster_inference.gguf.load_gguf_state_dict(
+                p,
+                text_model=True,
+                residency_mode=model_options.get("gguf_residency", "memory"),
+                decoded_budget_bytes=model_options.get("gguf_decoded_budget_bytes"),
+                load_device=model_options.get("load_device"),
+                decoded_dtype=decoded_dtype,
+            )
+            gguf_info.append(info)
+        else:
+            sd, metadata = dinkster_inference.utils.load_torch_file(p, safe_load=True, return_metadata=True)
         if model_options.get("custom_operations", None) is None:
             sd, metadata = dinkster_inference.utils.convert_old_quants(sd, model_prefix="", metadata=metadata)
         clip_data.append(sd)
     clip = load_text_encoder_state_dicts(clip_data, embedding_directory=embedding_directory, clip_type=clip_type, model_options=model_options, disable_dynamic=disable_dynamic)
+    if gguf_info:
+        clip.patcher.attachments["gguf"] = tuple(gguf_info)
     clip.patcher.cached_patcher_init = (load_clip_model_patcher, (ckpt_paths, embedding_directory, clip_type, model_options))
     return clip
 
@@ -2396,6 +2419,17 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
     else:
         unet_dtype = dtype
 
+    gguf_info = model_options.get("_gguf_info")
+    if gguf_info is not None:
+        sd, gguf_info = dinkster_inference.gguf.apply_gguf_residency(
+            sd,
+            gguf_info,
+            residency_mode=model_options.get("gguf_residency", "memory"),
+            decoded_dtype=unet_dtype,
+            decoded_budget_bytes=model_options.get("gguf_decoded_budget_bytes"),
+            load_device=load_device,
+        )
+
     if model_config.quant_config is not None:
         manual_cast_dtype = model_management.unet_manual_cast(None, load_device, model_config.supported_inference_dtypes)
     else:
@@ -2420,14 +2454,30 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
     left_over = sd.keys()
     if len(left_over) > 0:
         logging.info("left over keys in diffusion model: {}".format(left_over))
+    if gguf_info is not None:
+        model_patcher.attachments["gguf"] = gguf_info
     return model_patcher
 
 def load_diffusion_model(unet_path, model_options={}, disable_dynamic=False):
-    sd, metadata = dinkster_inference.utils.load_torch_file(unet_path, return_metadata=True)
+    gguf_info = None
+    if unet_path.lower().endswith(".gguf"):
+        model_options = model_options.copy()
+        model_options["custom_operations"] = dinkster_inference.gguf_ops.GGUFOps()
+        sd, gguf_info = dinkster_inference.gguf.load_gguf_state_dict(
+            unet_path,
+            residency_mode="memory",
+            load_device=model_options.get("load_device"),
+        )
+        model_options["_gguf_info"] = gguf_info
+        metadata = gguf_info.metadata
+    else:
+        sd, metadata = dinkster_inference.utils.load_torch_file(unet_path, return_metadata=True)
     model = load_diffusion_model_state_dict(sd, model_options=model_options, metadata=metadata, disable_dynamic=disable_dynamic)
     if model is None:
         logging.error("ERROR UNSUPPORTED DIFFUSION MODEL {}".format(unet_path))
         raise RuntimeError("ERROR: Could not detect model type of: {}\n{}".format(unet_path, model_detection_error_hint(unet_path, sd)))
+    if gguf_info is not None:
+        model.attachments.setdefault("gguf", gguf_info)
     model.cached_patcher_init = (load_diffusion_model, (unet_path, model_options))
     return model
 
