@@ -11,6 +11,8 @@ import gguf
 import torch
 from sentencepiece import sentencepiece_model_pb2
 
+from . import utils
+
 
 class GGUFError(ValueError):
     pass
@@ -325,6 +327,55 @@ def _decoded_budget(load_device, encoded_bytes):
 
     free = model_management.get_free_memory(load_device)
     return max(0, int(free - model_management.minimum_inference_memory() - encoded_bytes))
+
+
+class GGUFBalancedResidency:
+    def __init__(self, info, decoded_dtype, decoded_budget_bytes):
+        self.info = info
+        self.decoded_dtype = decoded_dtype
+        self.decoded_budget_bytes = decoded_budget_bytes
+        self.baseline_bytes = None
+        self.decoded_bytes = 0
+        self.growth_bytes = 0
+        self.loaded_memory_target = -1
+
+    def on_model_load_target(self, model_patcher, loaded_memory_target):
+        target = float("inf") if loaded_memory_target == 0 else loaded_memory_target
+        if target <= self.loaded_memory_target:
+            return
+        self.loaded_memory_target = target
+        if self.baseline_bytes is None:
+            self.baseline_bytes = model_patcher.model_size()
+        growth_budget = None
+        if loaded_memory_target > 0:
+            growth_budget = max(0, int(loaded_memory_target - self.baseline_bytes))
+
+        changed = False
+        for name, parameter in model_patcher.model.named_parameters():
+            if not is_encoded_gguf_tensor(parameter):
+                continue
+            decoded_size = parameter.shape.numel() * torch.empty(
+                (), dtype=self.decoded_dtype
+            ).element_size()
+            growth = decoded_size - parameter.nbytes
+            if self.decoded_bytes + decoded_size > self.decoded_budget_bytes:
+                continue
+            if growth_budget is not None and self.growth_bytes + growth > growth_budget:
+                continue
+            decoded = decode_gguf_tensor(parameter, dtype=self.decoded_dtype)
+            utils.set_attr_param(model_patcher.model, name, decoded)
+            self.decoded_bytes += decoded_size
+            self.growth_bytes += growth
+            changed = True
+
+        if changed:
+            model_patcher.size = 0
+        info = replace(
+            self.info,
+            decoded_weight_bytes=self.decoded_bytes,
+        )
+        self.info = info
+        model_patcher.attachments["gguf"] = info
 
 
 def apply_gguf_residency(

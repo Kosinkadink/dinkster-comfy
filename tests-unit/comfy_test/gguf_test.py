@@ -10,6 +10,7 @@ from dinkster_inference import model_management, model_patcher, sd, utils
 from dinkster_inference.gguf import (
     GGUF_BLOCK_DECODERS,
     GGUF_BLOCK_SHAPES,
+    GGUFBalancedResidency,
     GGUFError,
     GGUFLoadInfo,
     GGUFWeightTensor,
@@ -259,6 +260,48 @@ def test_encoded_and_predecoded_weights_use_model_patcher_accounting():
     assert patcher.loaded_size() == 0
     assert patcher.partially_load(torch.device("cpu"), 1024) == patcher.model_size()
     assert patcher.loaded_size() == patcher.model_size()
+
+
+def test_balanced_residency_does_not_grow_past_loaded_memory_target():
+    blocks = _blocks("Q8_0", count=2)
+    encoded = GGUFWeightTensor(
+        blocks,
+        ggml_type=SimpleNamespace(name="Q8_0"),
+        tensor_shape=(2, 32),
+    )
+
+    def make_patcher():
+        model = GGUFOps.Linear(32, 2, bias=False, dtype=torch.float16)
+        model.load_state_dict({"weight": encoded})
+        patcher = model_patcher.ModelPatcher(
+            model, load_device=torch.device("cpu"), offload_device=torch.device("cpu")
+        )
+        info = GGUFLoadInfo("sdxl", "balanced", 128, 0, blocks.nbytes, {})
+        patcher.attachments["gguf"] = info
+        patcher.attachments["gguf_balanced_residency"] = GGUFBalancedResidency(
+            info, torch.float16, 128
+        )
+        return patcher
+
+    constrained = make_patcher()
+    baseline = constrained.model_size()
+    constrained.attachments["gguf_balanced_residency"].on_model_load_target(
+        constrained, baseline
+    )
+    assert isinstance(constrained.model.weight, GGUFWeightTensor)
+    assert constrained.attachments["gguf"].decoded_weight_bytes == 0
+    constrained.attachments["gguf_balanced_residency"].on_model_load_target(
+        constrained, baseline + 60
+    )
+    assert not isinstance(constrained.model.weight, GGUFWeightTensor)
+    assert constrained.attachments["gguf"].decoded_weight_bytes == 128
+
+    admitted = make_patcher()
+    admitted.attachments["gguf_balanced_residency"].on_model_load_target(
+        admitted, baseline + 60
+    )
+    assert not isinstance(admitted.model.weight, GGUFWeightTensor)
+    assert admitted.attachments["gguf"].decoded_weight_bytes == 128
 
 
 def _write_q8(path, architecture="sdxl"):

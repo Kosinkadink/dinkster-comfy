@@ -1,5 +1,6 @@
 import json
 import torch
+from dataclasses import replace
 from enum import Enum
 import logging
 
@@ -2421,14 +2422,26 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
 
     gguf_info = model_options.get("_gguf_info")
     if gguf_info is not None:
-        sd, gguf_info = dinkster_inference.gguf.apply_gguf_residency(
-            sd,
-            gguf_info,
-            residency_mode=model_options.get("gguf_residency", "memory"),
-            decoded_dtype=unet_dtype,
-            decoded_budget_bytes=model_options.get("gguf_decoded_budget_bytes"),
-            load_device=load_device,
-        )
+        gguf_residency = model_options.get("gguf_residency", "memory")
+        decoded_budget = model_options.get("gguf_decoded_budget_bytes")
+        if gguf_residency == "balanced" and decoded_budget is None:
+            decoded_budget = dinkster_inference.gguf._decoded_budget(
+                load_device, gguf_info.encoded_weight_bytes
+            )
+            gguf_info = replace(
+                gguf_info,
+                residency_mode="balanced",
+                decoded_budget_bytes=decoded_budget,
+            )
+        else:
+            sd, gguf_info = dinkster_inference.gguf.apply_gguf_residency(
+                sd,
+                gguf_info,
+                residency_mode=gguf_residency,
+                decoded_dtype=unet_dtype,
+                decoded_budget_bytes=decoded_budget,
+                load_device=load_device,
+            )
 
     if model_config.quant_config is not None:
         manual_cast_dtype = model_management.unet_manual_cast(None, load_device, model_config.supported_inference_dtypes)
@@ -2456,6 +2469,12 @@ def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable
         logging.info("left over keys in diffusion model: {}".format(left_over))
     if gguf_info is not None:
         model_patcher.attachments["gguf"] = gguf_info
+        if gguf_residency == "balanced" and model_options.get("gguf_decoded_budget_bytes") is None:
+            model_patcher.attachments["gguf_balanced_residency"] = (
+                dinkster_inference.gguf.GGUFBalancedResidency(
+                    gguf_info, unet_dtype, gguf_info.decoded_budget_bytes
+                )
+            )
     return model_patcher
 
 def load_diffusion_model(unet_path, model_options={}, disable_dynamic=False):
