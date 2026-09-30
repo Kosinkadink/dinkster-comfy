@@ -29,7 +29,7 @@ dependencies = [
   "psutil",
   "filelock",
   "av>=17.0.0",
-  "comfy-kitchen==0.2.35",
+  "comfy-kitchen==0.2.36",
   "comfy-aimdo==0.5.5",
   "requests",
   "simpleeval>=1.0.0",
