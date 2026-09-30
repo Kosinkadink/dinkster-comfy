@@ -1,4 +1,4 @@
-"""Krea 2 (K2) — single-stream MMDiT.
+"""Krea 2 (K2) -- single-stream MMDiT.
 
 Text tokens produced by a Qwen3-VL-4B 12-layer ``txtfusion`` adapter and patchified image tokens are
 concatenated into one sequence and run through ``layers`` shared transformer blocks with
@@ -18,7 +18,7 @@ import dinkster_inference.ldm.common_dit
 import dinkster_inference.utils
 from dinkster_inference.ldm.flux.layers import EmbedND, timestep_embedding
 from dinkster_inference.ldm.flux.math import apply_rope
-from dinkster_inference.ldm.modules.attention import optimized_attention_masked
+from dinkster_inference.ldm.modules.attention import AttentionTensorContainer, ComfyAttention, optimized_attention_masked
 
 
 class RMSNorm(nn.Module):
@@ -63,6 +63,7 @@ class Attention(nn.Module):
     def __init__(self, dim: int, heads: int, kvheads: Optional[int] = None, bias: bool = False,
                  device=None, dtype=None, operations=None):
         super().__init__()
+        self.comfy_attention = ComfyAttention()
         self.heads = heads
         self.kvheads = kvheads if kvheads is not None else heads
         self.headdim = dim // self.heads
@@ -94,8 +95,9 @@ class Attention(nn.Module):
             rep = self.heads // self.kvheads
             k = k.repeat_interleave(rep, dim=1)
             v = v.repeat_interleave(rep, dim=1)
+        q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
         out = optimized_attention_masked(q, k, v, self.heads, mask=mask, skip_reshape=True,
-                                         transformer_options=transformer_options)
+                                         preferred_attention=self.comfy_attention, transformer_options=transformer_options)
 
         if "block_index" in transformer_options and "attn1_output_patch" in transformer_patches:
             for p in transformer_patches["attn1_output_patch"]:
