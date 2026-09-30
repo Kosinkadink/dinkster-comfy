@@ -335,14 +335,19 @@ jobs:
             title="Sync inference library with ComfyUI through ${TARGET:0:8}"
           fi
 
+          requires_review=false
+          if [ "$CONFLICT" = "true" ] || [ -n "$GUARDED" ]; then
+            requires_review=true
+          fi
+
           if [ -z "$pr" ]; then
             args=(--repo "$REPOSITORY" --base main --head upstream-sync --title "$title" --body-file "$body")
-            [ "$CONFLICT" = "true" ] && args+=(--draft)
+            [ "$requires_review" = "true" ] && args+=(--draft)
             url=$(gh pr create "${args[@]}")
             pr=${url##*/}
           else
             gh pr edit "$pr" --repo "$REPOSITORY" --title "$title" --body-file "$body"
-            if [ "$CONFLICT" = "true" ]; then
+            if [ "$requires_review" = "true" ]; then
               gh pr ready "$pr" --repo "$REPOSITORY" --undo || true
             else
               gh pr ready "$pr" --repo "$REPOSITORY" || true

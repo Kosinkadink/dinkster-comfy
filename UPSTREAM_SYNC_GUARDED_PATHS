@@ -1,5 +1,6 @@
 # Fork-owned execution, loading, and receipt seams. Patterns use Python fnmatch syntax.
 dinkster_inference/context_windows.py
+dinkster_inference/contribution_gain.py
 dinkster_inference/controlnet.py
 dinkster_inference/hooks.py
 dinkster_inference/ldm/modules/attention.py
@@ -12,22 +13,29 @@ dinkster_inference/model_prefetch.py
 dinkster_inference/multigpu.py
 dinkster_inference/ops.py
 dinkster_inference/patch_program.py
+dinkster_inference/patcher_extension.py
 dinkster_inference/pinned_memory.py
 dinkster_inference/res4lyf_*.py
 dinkster_inference/sample.py
 dinkster_inference/sampler_assembly.py
 dinkster_inference/sampler_helpers.py
 dinkster_inference/samplers.py
+dinkster_inference/sd.py
 dinkster_inference/storage.py
+dinkster_inference/weight_adapter/*
 dinkster_inference/window_*.py
 pyproject.toml
 requirements.txt
 tests-unit/comfy_test/attention_registry_test.py
+tests-unit/comfy_test/goldens/res4lyf_rk_goldens.json
+tests-unit/comfy_test/minimax_control_test.py
 tests-unit/comfy_test/model_loading_test.py
 tests-unit/comfy_test/model_management_test.py
 tests-unit/comfy_test/res4lyf_sampler_test.py
 tests-unit/comfy_test/storage_test.py
+tests-unit/comfy_test/test_contribution_gain.py
 tests-unit/comfy_test/test_model_management_cpu.py
 tests-unit/comfy_test/test_patch_program.py
 tests-unit/comfy_test/window_execution_test.py
 tests-unit/comfy_test/window_plan_test.py
+tools/rewrite_upstream_imports.py
