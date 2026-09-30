@@ -1,0 +1,481 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Check upstream and package versions without pushing changes
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+      REPOSITORY: ${{ github.repository }}
+      DRY_RUN: ${{ inputs.dry_run || false }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_BOT_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate bot token
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::error::RELEASE_BOT_TOKEN is not set."
+            exit 1
+          fi
+
+      - name: Configure repository and labels
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/Comfy-Org/ComfyUI.git
+          git fetch --no-tags origin main
+          git fetch --no-tags upstream master
+          identity=$(gh api user)
+          name=$(jq -r .login <<< "$identity")
+          email="$(jq -r .id <<< "$identity")+$name@users.noreply.github.com"
+          {
+            echo "GIT_AUTHOR_NAME=$name"
+            echo "GIT_AUTHOR_EMAIL=$email"
+            echo "GIT_COMMITTER_NAME=$name"
+            echo "GIT_COMMITTER_EMAIL=$email"
+          } >> "$GITHUB_ENV"
+          if [ "$DRY_RUN" != "true" ]; then
+            gh label create upstream-sync --repo "$REPOSITORY" --color 0E8A16 --description "Automated upstream or dependency sync" --force
+            gh label create upstream-sync-conflict --repo "$REPOSITORY" --color B60205 --description "Upstream sync requires conflict resolution" --force
+          fi
+
+      - name: Sync ComfyUI
+        id: upstream
+        run: |
+          set -euo pipefail
+          recorded=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          ledger = Path("docs/ledger.md").read_text()
+          match = re.search(r"Upstream fork point:.*?`([0-9a-f]{40})`", ledger, re.DOTALL)
+          if match is None:
+              raise SystemExit("docs/ledger.md does not contain a 40-character upstream fork point")
+          print(match.group(1))
+          PY
+          )
+          target=$(git rev-parse upstream/master)
+          echo "recorded=$recorded" >> "$GITHUB_OUTPUT"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+
+          if [ "$recorded" = "$target" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor "$recorded" "$target"; then
+            echo "::error::Recorded fork point $recorded is not an ancestor of upstream master $target."
+            exit 1
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+          mapfile -t upstream_commits < <(git rev-list --reverse "$recorded..$target")
+          {
+            echo "commits<<EOF"
+            for commit in "${upstream_commits[@]}"; do
+              echo "- https://github.com/Comfy-Org/ComfyUI/commit/$commit"
+            done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: ${#upstream_commits[@]} upstream commits are pending."
+            exit 0
+          fi
+
+          write_guarded_paths() {
+            local revision=$1
+            python3 - "$revision" <<'PY'
+          import fnmatch
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          patterns = [
+              line.strip()
+              for line in Path("UPSTREAM_SYNC_GUARDED_PATHS").read_text().splitlines()
+              if line.strip() and not line.startswith("#")
+          ]
+          changed = subprocess.check_output(
+              ["git", "diff", "--name-only", f"origin/main...{sys.argv[1]}"], text=True
+          ).splitlines()
+          matches = [path for path in changed if any(fnmatch.fnmatch(path, pattern) for pattern in patterns)]
+          print("\n".join(matches))
+          PY
+          }
+
+          existing_pr=$(gh pr list --repo "$REPOSITORY" --state open --head upstream-sync --json number --jq '.[0].number // empty')
+          if [ -n "$existing_pr" ] && git ls-remote --exit-code --heads origin upstream-sync >/dev/null; then
+            git fetch --no-tags origin "refs/heads/upstream-sync:refs/remotes/origin/upstream-sync"
+            branch_target=$(python3 - <<'PY'
+          import re
+          import subprocess
+
+          def show(path: str) -> str:
+              return subprocess.check_output(
+                  ["git", "show", f"origin/upstream-sync:{path}"], text=True, stderr=subprocess.DEVNULL
+              )
+
+          try:
+              text = show("UPSTREAM_SYNC_CONFLICTS.md")
+              pattern = r"Upstream commit: `([0-9a-f]{40})`"
+          except subprocess.CalledProcessError:
+              text = show("docs/ledger.md")
+              pattern = r"Upstream fork point:.*?`([0-9a-f]{40})`"
+          match = re.search(pattern, text, re.DOTALL)
+          if match is None:
+              raise SystemExit("could not read the target from the existing upstream-sync branch")
+          print(match.group(1))
+          PY
+            )
+            if [ "$branch_target" = "$target" ]; then
+              head=$(git rev-parse origin/upstream-sync)
+              echo "head=$head" >> "$GITHUB_OUTPUT"
+              if git cat-file -e "origin/upstream-sync:UPSTREAM_SYNC_CONFLICTS.md" 2>/dev/null; then
+                echo "conflict=true" >> "$GITHUB_OUTPUT"
+                {
+                  echo "conflicts<<EOF"
+                  git show origin/upstream-sync:UPSTREAM_SYNC_CONFLICTS.md | sed -n 's/^- `\(.*\)`$/\1/p'
+                  echo "EOF"
+                } >> "$GITHUB_OUTPUT"
+              else
+                echo "conflict=false" >> "$GITHUB_OUTPUT"
+                guarded=$(write_guarded_paths origin/upstream-sync)
+                {
+                  echo "guarded<<EOF"
+                  printf '%s\n' "$guarded"
+                  echo "EOF"
+                } >> "$GITHUB_OUTPUT"
+              fi
+              exit 0
+            fi
+          fi
+
+          git switch --force-create upstream-sync origin/main
+          base=$(git rev-parse HEAD)
+          conflicts=()
+          if ! git merge-recursive "$recorded" -- "$base" "$target"; then
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            unresolved=()
+            for path in "${conflicts[@]}"; do
+              stages=$(git ls-files -u -- "$path" | awk '{print $3}' | sort -u | paste -sd, -)
+              if [[ "$path" = dinkster_inference/* ]] && [ "$stages" = "3" ]; then
+                git add -- "$path"
+              else
+                unresolved+=("$path")
+              fi
+            done
+            conflicts=("${unresolved[@]}")
+          fi
+          if [ "${#conflicts[@]}" -gt 0 ]; then
+            printf '%s\n' "${conflicts[@]}" > /tmp/upstream-conflicts
+            git reset --hard "$base"
+            {
+              echo "# Upstream sync conflicts"
+              echo
+              echo "Upstream commit: \`$target\`"
+              echo
+              echo "The automatic merge stopped on these paths:"
+              echo
+              for path in "${conflicts[@]}"; do
+                printf -- '- `%s`\n' "$path"
+              done
+            } > UPSTREAM_SYNC_CONFLICTS.md
+            git add UPSTREAM_SYNC_CONFLICTS.md
+            git commit -m "Record upstream sync conflicts through ${target:0:8}"
+            if git ls-remote --exit-code --heads origin upstream-sync >/dev/null; then
+              git fetch --no-tags origin "refs/heads/upstream-sync:refs/remotes/origin/upstream-sync"
+            fi
+            git push --force-with-lease origin HEAD:upstream-sync
+            echo "conflict=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "conflicts<<EOF"
+              cat /tmp/upstream-conflicts
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "conflict=false" >> "$GITHUB_OUTPUT"
+
+          # New inference files may not be recognized as part of the package rename.
+          if [ -d comfy ]; then
+            while IFS= read -r -d '' source; do
+              destination="dinkster_inference/${source#comfy/}"
+              mkdir -p "$(dirname "$destination")"
+              mv "$source" "$destination"
+              git add "$source" "$destination"
+            done < <(find comfy -type f -print0)
+          fi
+
+          # Preserve the inference-only boundary. Only upstream inference, retained
+          # library tests, and requirements changes flow through an automatic sync.
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              dinkster_inference/*|tests-unit/comfy_test/*|tests-unit/comfy_quant/*|tests-unit/deploy_environment_test.py|requirements.txt)
+                ;;
+              *)
+                if git cat-file -e "$base:$path" 2>/dev/null; then
+                  git checkout "$base" -- "$path"
+                else
+                  git rm -rf --ignore-unmatch -- "$path"
+                fi
+                ;;
+            esac
+          done < <(git diff --cached --name-only -z)
+
+          python3 tools/rewrite_upstream_imports.py dinkster_inference tests-unit/comfy_test tests-unit/comfy_quant tests-unit/deploy_environment_test.py
+          python3 - "$target" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          path = Path("docs/ledger.md")
+          ledger = path.read_text()
+          updated, count = re.subn(
+              r"(Upstream fork point:.*?`)\b[0-9a-f]{40}(`)",
+              rf"\g<1>{sys.argv[1]}\2",
+              ledger,
+              count=1,
+              flags=re.DOTALL,
+          )
+          if count != 1:
+              raise SystemExit("could not update docs/ledger.md fork point")
+          path.write_text(updated)
+          PY
+          git add -A
+          tree=$(git write-tree)
+          commit=$(printf 'Sync ComfyUI upstream through %s\n' "${target:0:8}" | git commit-tree "$tree" -p "$base" -p "$target")
+          git reset --hard "$commit"
+          if git ls-remote --exit-code --heads origin upstream-sync >/dev/null; then
+            git fetch --no-tags origin "refs/heads/upstream-sync:refs/remotes/origin/upstream-sync"
+          fi
+          git push --force-with-lease origin HEAD:upstream-sync
+          head=$(git rev-parse HEAD)
+          echo "head=$head" >> "$GITHUB_OUTPUT"
+
+          guarded=$(write_guarded_paths HEAD)
+          {
+            echo "guarded<<EOF"
+            printf '%s\n' "$guarded"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open or update upstream pull request
+        id: upstream_pr
+        if: steps.upstream.outputs.changed == 'true' && inputs.dry_run != true
+        env:
+          TARGET: ${{ steps.upstream.outputs.target }}
+          COMMITS: ${{ steps.upstream.outputs.commits }}
+          CONFLICT: ${{ steps.upstream.outputs.conflict }}
+          CONFLICTS: ${{ steps.upstream.outputs.conflicts }}
+          GUARDED: ${{ steps.upstream.outputs.guarded }}
+        run: |
+          set -euo pipefail
+          pr=$(gh pr list --repo "$REPOSITORY" --state open --head upstream-sync --json number --jq '.[0].number // empty')
+          body=$(mktemp)
+          if [ "$CONFLICT" = "true" ]; then
+            {
+              echo "Refs Kosinkadink/comfy-vibe-station#479"
+              echo
+              echo "Automatic merge with ComfyUI \`${TARGET}\` stopped on these paths:"
+              echo
+              while IFS= read -r path; do
+                [ -n "$path" ] && printf -- '- `%s`\n' "$path"
+              done <<< "$CONFLICTS"
+              echo
+              echo "Resolve the conflicts while preserving the fork-owned paths listed in \`UPSTREAM_SYNC_GUARDED_PATHS\`."
+            } > "$body"
+            title="Resolve ComfyUI sync conflicts through ${TARGET:0:8}"
+          else
+            {
+              echo "Refs Kosinkadink/comfy-vibe-station#479"
+              echo
+              echo "Sync ComfyUI through \`${TARGET}\`."
+              echo
+              echo "## Upstream commits"
+              echo
+              printf '%s\n' "$COMMITS"
+              echo
+              if [ -n "$GUARDED" ]; then
+                echo "## Guarded paths changed"
+                echo
+                while IFS= read -r path; do
+                  [ -n "$path" ] && printf -- '- `%s`\n' "$path"
+                done <<< "$GUARDED"
+                echo
+                echo "This pull request requires owner verification."
+              else
+                echo "No path in \`UPSTREAM_SYNC_GUARDED_PATHS\` changed. The workflow will merge this pull request only after both hosted checks pass at the exact head."
+              fi
+            } > "$body"
+            title="Sync inference library with ComfyUI through ${TARGET:0:8}"
+          fi
+
+          requires_review=false
+          if [ "$CONFLICT" = "true" ] || [ -n "$GUARDED" ]; then
+            requires_review=true
+          fi
+
+          if [ -z "$pr" ]; then
+            args=(--repo "$REPOSITORY" --base main --head upstream-sync --title "$title" --body-file "$body")
+            [ "$requires_review" = "true" ] && args+=(--draft)
+            url=$(gh pr create "${args[@]}")
+            pr=${url##*/}
+          else
+            gh pr edit "$pr" --repo "$REPOSITORY" --title "$title" --body-file "$body"
+            if [ "$requires_review" = "true" ]; then
+              gh pr ready "$pr" --repo "$REPOSITORY" --undo || true
+            else
+              gh pr ready "$pr" --repo "$REPOSITORY" || true
+            fi
+          fi
+          rm -f "$body"
+
+          gh pr edit "$pr" --repo "$REPOSITORY" --add-label upstream-sync
+          if [ "$CONFLICT" = "true" ]; then
+            gh pr edit "$pr" --repo "$REPOSITORY" --add-label upstream-sync-conflict
+          else
+            gh pr edit "$pr" --repo "$REPOSITORY" --remove-label upstream-sync-conflict 2>/dev/null || true
+          fi
+          echo "number=$pr" >> "$GITHUB_OUTPUT"
+
+      - name: Merge clean unguarded sync after hosted checks
+        if: steps.upstream.outputs.changed == 'true' && steps.upstream.outputs.conflict == 'false' && steps.upstream.outputs.guarded == '' && inputs.dry_run != true
+        env:
+          PR_NUMBER: ${{ steps.upstream_pr.outputs.number }}
+          EXPECTED_HEAD: ${{ steps.upstream.outputs.head }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            checks=$(gh api "repos/${REPOSITORY}/commits/${EXPECTED_HEAD}/check-runs")
+            package_status=$(jq -r '[.check_runs[] | select(.name == "package-and-test")][0].status // "missing"' <<< "$checks")
+            package_result=$(jq -r '[.check_runs[] | select(.name == "package-and-test")][0].conclusion // ""' <<< "$checks")
+            author_status=$(jq -r '[.check_runs[] | select(.name == "Check for AI agent co-author trailers")][0].status // "missing"' <<< "$checks")
+            author_result=$(jq -r '[.check_runs[] | select(.name == "Check for AI agent co-author trailers")][0].conclusion // ""' <<< "$checks")
+            if [ "$package_status" = "completed" ] && [ "$author_status" = "completed" ]; then
+              if [ "$package_result" != "success" ] || [ "$author_result" != "success" ]; then
+                echo "::error::Hosted checks failed at $EXPECTED_HEAD: package-and-test=$package_result, co-author=$author_result"
+                exit 1
+              fi
+              break
+            fi
+            if [ "$attempt" -eq 60 ]; then
+              echo "::error::Hosted checks did not complete at $EXPECTED_HEAD within 10 minutes."
+              exit 1
+            fi
+            sleep 10
+          done
+
+          current=$(gh pr view "$PR_NUMBER" --repo "$REPOSITORY" --json headRefOid --jq .headRefOid)
+          if [ "$current" != "$EXPECTED_HEAD" ]; then
+            echo "::error::Pull request head changed from $EXPECTED_HEAD to $current."
+            exit 1
+          fi
+          gh pr merge "$PR_NUMBER" --repo "$REPOSITORY" --squash --match-head-commit "$EXPECTED_HEAD"
+
+      - name: Check dependency releases
+        run: |
+          set -euo pipefail
+          git switch --detach origin/main
+          for package in comfy-kitchen comfy-aimdo; do
+            current=$(python3 - "$package" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          package = sys.argv[1]
+          pins = []
+          for filename in ("requirements.txt", "pyproject.toml"):
+              match = re.search(rf'\b{re.escape(package)}==([^"\s,]+)', Path(filename).read_text())
+              if match is None:
+                  raise SystemExit(f"{filename} does not pin {package}")
+              pins.append(match.group(1))
+          if pins[0] != pins[1]:
+              raise SystemExit(f"{package} pins disagree: {pins}")
+          print(pins[0])
+          PY
+            )
+            latest=$(curl --fail --silent --show-error "https://pypi.org/pypi/${package}/json" | jq -r .info.version)
+            newest=$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)
+            if [ "$latest" = "$current" ] || [ "$newest" != "$latest" ]; then
+              echo "$package is current at $current"
+              continue
+            fi
+            echo "$package has a newer release: $current -> $latest"
+            if [ "$DRY_RUN" = "true" ]; then
+              continue
+            fi
+
+            branch="upstream-sync-${package}"
+            pr=$(gh pr list --repo "$REPOSITORY" --state open --head "$branch" --json number,title --jq '.[0] // empty')
+            if [ -n "$pr" ] && [ "$(jq -r .title <<< "$pr")" = "Bump ${package} to ${latest}" ]; then
+              echo "An open ${package} ${latest} pull request already exists."
+              continue
+            fi
+            git switch --force-create "$branch" origin/main
+            python3 - "$package" "$latest" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          package, version = sys.argv[1:]
+          for filename in ("requirements.txt", "pyproject.toml"):
+              path = Path(filename)
+              updated, count = re.subn(
+                  rf'(\b{re.escape(package)}==)[^"\s,]+',
+                  rf'\g<1>{version}',
+                  path.read_text(),
+              )
+              if count != 1:
+                  raise SystemExit(f"expected one {package} pin in {filename}, found {count}")
+              path.write_text(updated)
+          PY
+            git add requirements.txt pyproject.toml
+            git commit -m "Bump ${package} to ${latest}"
+            if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+              git fetch --no-tags origin "refs/heads/${branch}:refs/remotes/origin/${branch}"
+            fi
+            git push --force-with-lease origin "HEAD:${branch}"
+
+            pr=$(jq -r '.number // empty' <<< "$pr")
+            body=$(mktemp)
+            {
+              echo "Refs Kosinkadink/comfy-vibe-station#479"
+              echo
+              echo "Pin ${package} ${latest} in \`requirements.txt\` and \`pyproject.toml\`."
+              echo
+              echo "Release: https://pypi.org/project/${package}/${latest}/"
+            } > "$body"
+            if [ -z "$pr" ]; then
+              gh pr create --repo "$REPOSITORY" --base main --head "$branch" --title "Bump ${package} to ${latest}" --body-file "$body"
+            else
+              gh pr edit "$pr" --repo "$REPOSITORY" --title "Bump ${package} to ${latest}" --body-file "$body"
+            fi
+            rm -f "$body"
+            pr=$(gh pr list --repo "$REPOSITORY" --state open --head "$branch" --json number --jq '.[0].number')
+            gh pr edit "$pr" --repo "$REPOSITORY" --add-label upstream-sync
+          done
