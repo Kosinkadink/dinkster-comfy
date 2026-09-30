@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import itertools
-import math
 from dataclasses import dataclass
 
 import torch
@@ -201,29 +200,11 @@ def merge_window_tensors(
         AccumulationDType.FLOAT32: torch.float32,
         AccumulationDType.FLOAT64: torch.float64,
     }[plan.merge.accumulation_dtype]
+    accumulator = torch.zeros(output_shape, dtype=accumulation_dtype, device=first.device)
+    denominator = torch.zeros(output_shape, dtype=accumulation_dtype, device=first.device)
     occurrence_positions = _axis_positions(plan, layout)
     dimension_by_axis = dict(layout.axis_dimensions)
     axis_by_dimension = {dimension: axis for axis, dimension in layout.axis_dimensions}
-    unique_indices = all(
-        all(len(indices) == len(set(indices)) for indices in _kind_indices(window, layout.kind).values())
-        for window in plan.joint_windows
-    )
-    if unique_indices:
-        mapped_dimensions = sorted(axis_by_dimension)
-        other_dimensions = [
-            dimension for dimension in range(len(output_shape)) if dimension not in axis_by_dimension
-        ]
-        permutation = mapped_dimensions + other_dimensions
-        permuted_shape = tuple(output_shape[dimension] for dimension in permutation)
-        flat_shape = (
-            math.prod(output_shape[dimension] for dimension in mapped_dimensions),
-            *(output_shape[dimension] for dimension in other_dimensions),
-        )
-        accumulator = torch.zeros(flat_shape, dtype=accumulation_dtype, device=first.device)
-        denominator = torch.zeros(flat_shape, dtype=accumulation_dtype, device=first.device)
-    else:
-        accumulator = torch.zeros(output_shape, dtype=accumulation_dtype, device=first.device)
-        denominator = torch.zeros(output_shape, dtype=accumulation_dtype, device=first.device)
 
     for window, output in zip(plan.joint_windows, outputs, strict=True):
         expected_shape = list(output_shape)
@@ -271,26 +252,15 @@ def merge_window_tensors(
             weight_shape[dimension_by_axis[axis]] = len(local_entries[axis])
         weights = weights.reshape(weight_shape)
 
-        if unique_indices:
-            local_count = math.prod(expected_shape[dimension] for dimension in mapped_dimensions)
-            values = output.permute(permutation).reshape(local_count, *flat_shape[1:])
-            flat_weights = weights.permute(permutation).reshape(
-                local_count, *(1 for _ in other_dimensions)
-            )
-            mapped_axes = [axis_by_dimension[dimension] for dimension in mapped_dimensions]
-            strides = [
-                math.prod(output_shape[other] for other in mapped_dimensions[index + 1 :])
-                for index in range(len(mapped_dimensions))
-            ]
-            target = torch.tensor(
-                [
-                    sum(coordinate * stride for coordinate, stride in zip(coordinates, strides, strict=True))
-                    for coordinates in itertools.product(*(kind_indices[axis] for axis in mapped_axes))
-                ],
-                device=first.device,
-            )
-            accumulator.index_add_(0, target, values.to(accumulation_dtype) * flat_weights)
-            denominator.index_add_(0, target, flat_weights.expand_as(values))
+        if all(len(indices) == len(set(indices)) for indices in kind_indices.values()):
+            coordinates = []
+            for dimension, size in enumerate(expected_shape):
+                axis = axis_by_dimension.get(dimension)
+                values = range(size) if axis is None else kind_indices[axis]
+                coordinates.append(torch.tensor(tuple(values), device=first.device))
+            target = torch.meshgrid(*coordinates, indexing="ij")
+            accumulator[target] += output.to(accumulation_dtype) * weights
+            denominator[target] += weights.expand(expected_shape)
             continue
 
         for local_positions in itertools.product(
@@ -314,10 +284,6 @@ def merge_window_tensors(
             target_index = tuple(target)
             accumulator[target_index].add_(output[source_index].to(accumulation_dtype) * weight)
             denominator[target_index].add_(weight)
-    if unique_indices:
-        inverse_permutation = [permutation.index(dimension) for dimension in range(len(output_shape))]
-        accumulator = accumulator.reshape(permuted_shape).permute(inverse_permutation)
-        denominator = denominator.reshape(permuted_shape).permute(inverse_permutation)
     return (accumulator / denominator).to(first.dtype)
 
 
