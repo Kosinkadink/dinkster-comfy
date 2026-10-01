@@ -112,8 +112,8 @@ def _run_cache_dit_blocks(h, run_block, block_count, config, runtime, cache_key,
     computed_blocks = list(range(first_blocks))
     for index in computed_blocks:
         h = run_block(index, h)
-    first_output = h.clone()
-    first_residual = first_output - block_input
+    first_residual = h - block_input
+    del block_input
 
     relative_difference = None
     can_cache = False
@@ -136,11 +136,16 @@ def _run_cache_dit_blocks(h, run_block, block_count, config, runtime, cache_key,
         skipped_blocks = list(range(first_blocks, block_count))
         runtime["hits"] += 1
     else:
+        state["previous_first_residual"] = None
+        state["middle_residual"] = None
+        previous = None
+        middle = None
+        first_output = h.clone()
         for index in range(first_blocks, block_count):
             h = run_block(index, h)
             computed_blocks.append(index)
         state["previous_first_residual"] = first_residual
-        state["middle_residual"] = h - first_output
+        state["middle_residual"] = first_output.neg_().add_(h)
         state["continuous_cached_steps"] = 0
         skipped_blocks = []
         runtime["misses"] += 1
