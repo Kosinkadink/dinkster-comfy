@@ -900,10 +900,13 @@ class MiniMaxH3Model(nn.Module):
             for i in range(len(self.blocks)):
                 h = run_block(i, h)
         else:
-            runtime = cache_config.get("runtime")
+            runtime_provider = cache_config.get("runtime")
             sample_sigmas = transformer_options.get("sample_sigmas")
-            if not isinstance(runtime, dict):
+            if not callable(runtime_provider):
                 raise RuntimeError("MiniMax H3 Cache-DiT needs invocation-local runtime state")
+            runtime = runtime_provider()
+            if not isinstance(runtime, dict):
+                raise RuntimeError("MiniMax H3 Cache-DiT runtime provider returned invalid state")
             if sample_sigmas is None:
                 raise RuntimeError("MiniMax H3 Cache-DiT needs the exact sampler sigma schedule")
             sigma_index = int((sample_sigmas - sigma_v).abs().argmin())
