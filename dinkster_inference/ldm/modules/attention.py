@@ -1004,14 +1004,15 @@ def attention_flash4_sm120_dense(q, k, v, heads, mask=None, attn_precision=None,
         )
         q_s, k_s, v_s = map(lambda tensor: tensor.transpose(1, 2), (q_s, k_s, v_s))
 
-    out = flash_attn4_func(
+    out, _ = flash_attn4_func(
         q_s.transpose(1, 2),
         k_s.transpose(1, 2),
         v_s.transpose(1, 2),
         softmax_scale=kwargs.get("scale"),
         causal=False,
         num_splits=1,
-    ).transpose(1, 2)
+    )
+    out = out.transpose(1, 2)
     if not skip_output_reshape:
         out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
     return out

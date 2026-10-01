@@ -90,7 +90,7 @@ def test_flash4_sm120_dense_preserves_attention_layout_and_scale(monkeypatch):
 
     def flash4(q, k, v, **kwargs):
         calls.append((q.shape, k.shape, v.shape, kwargs))
-        return q + 1
+        return q + 1, torch.zeros(q.shape[:-1])
 
     monkeypatch.setattr(attention, "flash_attn4_func", flash4, raising=False)
     monkeypatch.setattr(attention, "_flash4_sm120_dense_supported", lambda *args: True)
