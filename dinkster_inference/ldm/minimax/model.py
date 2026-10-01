@@ -14,6 +14,7 @@ video schedule (ModelSamplingAV); forward() undoes that scale and converts the
 velocity back, so _forward only ever sees the stream's own latent.
 """
 
+import hashlib
 import math
 
 import torch
@@ -31,6 +32,130 @@ FRAME_PER_TOKEN = (1, 4, 4, 4, 4)
 FRAME_RESCALE = 5.0 / 3.0
 VISUAL_COND_TIMESTEP = 0.999
 AUDIO_COND_TIMESTEP = 1.0
+
+
+def _tensor_sha256(value):
+    tensor = value.detach().to("cpu").contiguous()
+    digest = hashlib.sha256()
+    digest.update(str(tensor.dtype).encode())
+    digest.update(str(tuple(tensor.shape)).encode())
+    digest.update(tensor.view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _cache_dit_policy(config, block_count):
+    required = {
+        "model_identity": str,
+        "policy": str,
+        "Fn_compute_blocks": int,
+        "max_warmup_steps": int,
+        "residual_diff_threshold": (int, float),
+        "max_continuous_cached_steps": int,
+    }
+    for name, expected in required.items():
+        value = config.get(name)
+        if not isinstance(value, expected) or isinstance(value, bool):
+            raise TypeError(f"MiniMax H3 Cache-DiT {name} is invalid")
+    first_blocks = config["Fn_compute_blocks"]
+    if first_blocks < 1 or first_blocks >= block_count:
+        raise ValueError("MiniMax H3 Cache-DiT must compute at least one but not all blocks")
+    if config["max_warmup_steps"] < 0:
+        raise ValueError("MiniMax H3 Cache-DiT warmup must not be negative")
+    if not 0.0 < config["residual_diff_threshold"] < 1.0:
+        raise ValueError("MiniMax H3 Cache-DiT threshold must be between zero and one")
+    if config["max_continuous_cached_steps"] < 1:
+        raise ValueError("MiniMax H3 Cache-DiT consecutive step limit must be positive")
+    return first_blocks
+
+
+def _cache_dit_key(config, sample_sigmas, context, layout, block_count):
+    first_blocks = _cache_dit_policy(config, block_count)
+    audio_segment = next(segment for segment in layout.segments if segment[2] == "audio")
+    video_segment = next(segment for segment in layout.segments if segment[2] == "video")
+    fields = {
+        "model": config["model_identity"],
+        "sigmas": _tensor_sha256(sample_sigmas),
+        "conditioning": _tensor_sha256(context),
+        "layout": (layout.signature, tuple(layout.segments)),
+        "blocks": tuple(range(first_blocks, block_count)),
+        "segments": (audio_segment, video_segment),
+        "policy": (
+            config["policy"],
+            first_blocks,
+            config["max_warmup_steps"],
+            float(config["residual_diff_threshold"]),
+            config["max_continuous_cached_steps"],
+        ),
+    }
+    return tuple(fields.items()), fields
+
+
+def _run_cache_dit_blocks(h, run_block, block_count, config, runtime, cache_key, key_fields, step):
+    state = runtime.get("state")
+    if runtime.get("key") != cache_key or (state is not None and step <= state["last_step"]):
+        if runtime.get("key") is not None:
+            runtime["invalidations"] += 1
+        state = None
+    if state is None:
+        state = {
+            "last_step": -1,
+            "previous_first_residual": None,
+            "middle_residual": None,
+            "continuous_cached_steps": 0,
+        }
+        runtime["key"] = cache_key
+        runtime["key_fields"] = key_fields
+        runtime["state"] = state
+
+    first_blocks = config["Fn_compute_blocks"]
+    block_input = h.clone()
+    computed_blocks = list(range(first_blocks))
+    for index in computed_blocks:
+        h = run_block(index, h)
+    first_output = h.clone()
+    first_residual = first_output - block_input
+
+    relative_difference = None
+    can_cache = False
+    previous = state["previous_first_residual"]
+    middle = state["middle_residual"]
+    if (
+        step >= config["max_warmup_steps"]
+        and previous is not None
+        and middle is not None
+        and state["continuous_cached_steps"] < config["max_continuous_cached_steps"]
+        and previous.shape == first_residual.shape
+    ):
+        mean_base = previous.abs().mean()
+        relative_difference = float(((previous - first_residual).abs().mean() / mean_base).item())
+        can_cache = relative_difference < config["residual_diff_threshold"]
+
+    if can_cache:
+        h.add_(middle)
+        state["continuous_cached_steps"] += 1
+        skipped_blocks = list(range(first_blocks, block_count))
+        runtime["hits"] += 1
+    else:
+        for index in range(first_blocks, block_count):
+            h = run_block(index, h)
+            computed_blocks.append(index)
+        state["previous_first_residual"] = first_residual
+        state["middle_residual"] = h - first_output
+        state["continuous_cached_steps"] = 0
+        skipped_blocks = []
+        runtime["misses"] += 1
+
+    state["last_step"] = step
+    runtime["events"].append(
+        {
+            "step": step,
+            "cache_hit": can_cache,
+            "relative_difference": relative_difference,
+            "computed_blocks": computed_blocks,
+            "skipped_blocks": skipped_blocks,
+        }
+    )
+    return h
 
 
 def time_shift_sigma(sigma, from_shift, to_shift):
@@ -749,20 +874,47 @@ class MiniMaxH3Model(nn.Module):
         # blocks
         patches_replace = transformer_options.get("patches_replace", {})
         blocks_replace = patches_replace.get("dit", {})
-        prefetch_queue = dinkster_inference.model_prefetch.make_prefetch_queue(list(self.blocks), device, transformer_options)
-        for i, block in enumerate(self.blocks):
+        cache_config = transformer_options.get("dinkster_h3_cache_dit")
+        prefetch_queue = None if cache_config is not None else dinkster_inference.model_prefetch.make_prefetch_queue(list(self.blocks), device, transformer_options)
+
+        def run_block(i, value):
+            block = self.blocks[i]
             dinkster_inference.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block, malloc_scope="block")
             transformer_options["block_index"] = i
             if ("double_block", i) in blocks_replace:
                 def block_wrap(args):
                     return {"img": block(args["img"], args["t_emb"], args["mod_segments"], args["rope_freqs"],
                                          transformer_options=args["transformer_options"], attention=args.get("attention"))}
-                h = blocks_replace[("double_block", i)](
-                    {"img": h, "t_emb": t_emb, "mod_segments": mod_segments, "rope_freqs": rope_freqs,
+                return blocks_replace[("double_block", i)](
+                    {"img": value, "t_emb": t_emb, "mod_segments": mod_segments, "rope_freqs": rope_freqs,
                      "layout": layout, "transformer_options": transformer_options},
                     {"original_block": block_wrap})["img"]
-            else:
-                h = block(h, t_emb, mod_segments, rope_freqs, transformer_options=transformer_options)
+            return block(value, t_emb, mod_segments, rope_freqs, transformer_options=transformer_options)
+
+        if cache_config is None:
+            for i in range(len(self.blocks)):
+                h = run_block(i, h)
+        else:
+            runtime = cache_config.get("runtime")
+            sample_sigmas = transformer_options.get("sample_sigmas")
+            if not isinstance(runtime, dict):
+                raise RuntimeError("MiniMax H3 Cache-DiT needs invocation-local runtime state")
+            if sample_sigmas is None:
+                raise RuntimeError("MiniMax H3 Cache-DiT needs the exact sampler sigma schedule")
+            sigma_index = int((sample_sigmas - sigma_v).abs().argmin())
+            cache_key, key_fields = _cache_dit_key(
+                cache_config, sample_sigmas, context, layout, len(self.blocks)
+            )
+            h = _run_cache_dit_blocks(
+                h,
+                run_block,
+                len(self.blocks),
+                cache_config,
+                runtime,
+                cache_key,
+                key_fields,
+                sigma_index,
+            )
         dinkster_inference.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None, malloc_scope="block")
 
         # target streams are single contiguous segments (audio then video, last two)
