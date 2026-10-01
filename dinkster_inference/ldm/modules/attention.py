@@ -55,6 +55,13 @@ except ImportError:
         logging.error(f"\n\nTo use the `--use-flash-attention` feature, the `flash-attn` package must be installed first.\ncommand:\n\t{sys.executable} -m pip install flash-attn")
         exit(-1)
 
+FLASH_ATTENTION4_SM120_IS_AVAILABLE = False
+try:
+    from flash_attn.cute import flash_attn_func as flash_attn4_func
+    FLASH_ATTENTION4_SM120_IS_AVAILABLE = True
+except ImportError:
+    pass
+
 COMFY_KITCHEN_INT8_ATTENTION_IS_AVAILABLE = comfy_kitchen.int8_attention_is_available()
 
 REGISTERED_ATTENTION_FUNCTIONS = {}
@@ -954,6 +961,62 @@ def attention_flash(q, k, v, heads, mask=None, attn_precision=None, skip_reshape
     return out
 
 
+def _flash4_sm120_dense_supported(q, k, v, heads, mask, attn_precision, skip_reshape, enable_gqa):
+    if (
+        mask is not None
+        or not q.is_cuda
+        or q.dtype not in (torch.float16, torch.bfloat16)
+        or k.dtype != q.dtype
+        or v.dtype != q.dtype
+        or k.device != q.device
+        or v.device != q.device
+        or attn_precision == torch.float32
+        or torch.cuda.get_device_capability(q.device) != (12, 0)
+    ):
+        return False
+    dim_head = q.shape[-1] if skip_reshape else q.shape[-1] // heads
+    return 8 <= dim_head <= 128 and dim_head % 8 == 0 and (not enable_gqa or skip_reshape)
+
+
+@wrap_attn
+def attention_flash4_sm120_dense(q, k, v, heads, mask=None, attn_precision=None, skip_reshape=False, skip_output_reshape=False, **kwargs):
+    enable_gqa = kwargs.get("enable_gqa", False)
+    if not _flash4_sm120_dense_supported(
+        q, k, v, heads, mask, attn_precision, skip_reshape, enable_gqa
+    ):
+        return attention_pytorch(
+            q, k, v, heads,
+            mask=mask,
+            attn_precision=attn_precision,
+            skip_reshape=skip_reshape,
+            skip_output_reshape=skip_output_reshape,
+            **kwargs,
+        )
+
+    if skip_reshape:
+        b, _, _, dim_head = q.shape
+        q_s, k_s, v_s = q, k, v
+    else:
+        b, _, dim_head = q.shape
+        dim_head //= heads
+        q_s, k_s, v_s = _reshape_qkv_to_heads(
+            q, k, v, b, heads, dim_head, enable_gqa, expand_kv=False
+        )
+        q_s, k_s, v_s = map(lambda tensor: tensor.transpose(1, 2), (q_s, k_s, v_s))
+
+    out = flash_attn4_func(
+        q_s.transpose(1, 2),
+        k_s.transpose(1, 2),
+        v_s.transpose(1, 2),
+        softmax_scale=kwargs.get("scale"),
+        causal=False,
+        num_splits=1,
+    ).transpose(1, 2)
+    if not skip_output_reshape:
+        out = out.transpose(1, 2).reshape(b, -1, heads * dim_head)
+    return out
+
+
 optimized_attention = attention_basic
 
 if model_management.sage_attention_enabled():
@@ -998,6 +1061,8 @@ if SAGE_ATTENTION3_IS_AVAILABLE:
     register_attention_function("sage3", attention3_sage)
 if FLASH_ATTENTION_IS_AVAILABLE:
     register_attention_function("flash", attention_flash)
+if FLASH_ATTENTION4_SM120_IS_AVAILABLE:
+    register_attention_function("flash4_sm120_dense", attention_flash4_sm120_dense)
 if model_management.xformers_enabled():
     register_attention_function("xformers", attention_xformers)
 register_attention_function("pytorch", attention_pytorch)

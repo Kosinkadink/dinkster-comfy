@@ -22,6 +22,7 @@ import torch.nn as nn
 import dinkster_inference.ldm.common_dit
 import dinkster_inference.model_management
 import dinkster_inference.model_prefetch
+from .kernels import try_indexed_gate_bf16_, try_indexed_scale_shift_bf16_
 import dinkster_inference.ops
 import dinkster_inference.patcher_extension
 import dinkster_inference.quant_ops
@@ -233,14 +234,18 @@ def _mod_row(vecs, row, dtype):
     return vecs[row].to(dtype)
 
 
-def _mod_scale_shift(h, shift, scale, segments):
+def _mod_scale_shift(h, shift, scale, segments, indices=None):
+    if indices is not None and try_indexed_scale_shift_bf16_(h, shift, scale, indices):
+        return h
     # segments: [(start, stop, mod_row)] covering h contiguously.
     for a, b, row in segments:
         h[a:b].mul_(1.0 + _mod_row(scale, row, h.dtype)).add_(_mod_row(shift, row, h.dtype))
     return h
 
 
-def _mod_gate(x, gate, other, segments):
+def _mod_gate(x, gate, other, segments, indices=None):
+    if indices is not None and try_indexed_gate_bf16_(x, gate, other, indices):
+        return x
     # other is the fresh attn/mlp output: accumulate the gated residual into the stream in place, one fused kernel per segment
     for a, b, row in segments:
         x[a:b].addcmul_(other[a:b], _mod_row(gate, row, x.dtype))
@@ -289,13 +294,13 @@ class DiTBlock(nn.Module):
                                     dtype=adaln_dtype if adaln_dtype is not None else dtype,
                                     device=device, operations=operations)
 
-    def forward(self, x, t_emb, mod_segments, rope_freqs, transformer_options={}, attention=None):
+    def forward(self, x, t_emb, mod_segments, rope_freqs, transformer_options={}, attention=None, mod_indices=None):
         attention = self.attn if attention is None else attention
         shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = self.adaln_proj(t_emb)
-        h = _mod_scale_shift(self.norm1(x), shift_msa, scale_msa, mod_segments)
-        x = _mod_gate(x, gate_msa, attention(h, rope_freqs=rope_freqs, transformer_options=transformer_options), mod_segments)
-        h = _mod_scale_shift(self.norm2(x), shift_mlp, scale_mlp, mod_segments)
-        return _mod_gate(x, gate_mlp, self.mlp(h), mod_segments)
+        h = _mod_scale_shift(self.norm1(x), shift_msa, scale_msa, mod_segments, mod_indices)
+        x = _mod_gate(x, gate_msa, attention(h, rope_freqs=rope_freqs, transformer_options=transformer_options), mod_segments, mod_indices)
+        h = _mod_scale_shift(self.norm2(x), shift_mlp, scale_mlp, mod_segments, mod_indices)
+        return _mod_gate(x, gate_mlp, self.mlp(h), mod_segments, mod_indices)
 
 
 class FinalLayer(nn.Module):
@@ -692,6 +697,9 @@ class MiniMaxH3Model(nn.Module):
                 mod_segments.append((a, b, rows_to_mod_index(audio_rows_t, seg_tag[kind])))
             else:
                 mod_segments.append((a, b, row_base + seg_tag[kind]))
+        mod_indices = torch.empty(layout.seq_len, dtype=torch.long, device=device)
+        for a, b, row in mod_segments:
+            mod_indices[a:b] = row
 
         # embed
         img_update = layout.img_update.to(device)
@@ -756,13 +764,15 @@ class MiniMaxH3Model(nn.Module):
             if ("double_block", i) in blocks_replace:
                 def block_wrap(args):
                     return {"img": block(args["img"], args["t_emb"], args["mod_segments"], args["rope_freqs"],
-                                         transformer_options=args["transformer_options"], attention=args.get("attention"))}
+                                         transformer_options=args["transformer_options"], attention=args.get("attention"),
+                                         mod_indices=args["mod_indices"])}
                 h = blocks_replace[("double_block", i)](
                     {"img": h, "t_emb": t_emb, "mod_segments": mod_segments, "rope_freqs": rope_freqs,
-                     "layout": layout, "transformer_options": transformer_options},
+                     "mod_indices": mod_indices, "layout": layout, "transformer_options": transformer_options},
                     {"original_block": block_wrap})["img"]
             else:
-                h = block(h, t_emb, mod_segments, rope_freqs, transformer_options=transformer_options)
+                h = block(h, t_emb, mod_segments, rope_freqs, transformer_options=transformer_options,
+                          mod_indices=mod_indices)
         dinkster_inference.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None, malloc_scope="block")
 
         # target streams are single contiguous segments (audio then video, last two)

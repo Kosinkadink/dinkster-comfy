@@ -85,6 +85,73 @@ def test_registry_selection_dispatches_through_attention_override():
     assert result == ("q", "k", "v", 8, "worker")
 
 
+def test_flash4_sm120_dense_preserves_attention_layout_and_scale(monkeypatch):
+    calls = []
+
+    def flash4(q, k, v, **kwargs):
+        calls.append((q.shape, k.shape, v.shape, kwargs))
+        return q + 1
+
+    monkeypatch.setattr(attention, "flash_attn4_func", flash4, raising=False)
+    monkeypatch.setattr(attention, "_flash4_sm120_dense_supported", lambda *args: True)
+    q = torch.arange(24.0).reshape(1, 2, 3, 4)
+
+    result = attention.attention_flash4_sm120_dense(
+        q,
+        q + 100,
+        q + 200,
+        2,
+        skip_reshape=True,
+        skip_output_reshape=True,
+        scale=0.375,
+    )
+
+    assert calls == [
+        (
+            torch.Size((1, 3, 2, 4)),
+            torch.Size((1, 3, 2, 4)),
+            torch.Size((1, 3, 2, 4)),
+            {"softmax_scale": 0.375, "causal": False, "num_splits": 1},
+        )
+    ]
+    assert torch.equal(result, q + 1)
+
+
+def test_flash4_sm120_dense_uses_sdpa_for_unsupported_calls(monkeypatch):
+    calls = []
+
+    def sdpa(q, k, v, heads, **kwargs):
+        calls.append((q, k, v, heads, kwargs))
+        return q + 7
+
+    monkeypatch.setattr(attention, "attention_pytorch", sdpa)
+    q = torch.zeros((1, 2, 3, 4))
+
+    result = attention.attention_flash4_sm120_dense(
+        q, q + 1, q + 2, 2, mask=torch.ones((3, 3)), skip_reshape=True, scale=0.5
+    )
+
+    assert torch.equal(result, q + 7)
+    assert calls[0][3] == 2
+    assert calls[0][4]["mask"].shape == (3, 3)
+    assert calls[0][4]["scale"] == 0.5
+
+
+def test_flash4_sm120_dense_does_not_hide_eligible_kernel_failures(monkeypatch):
+    monkeypatch.setattr(attention, "_flash4_sm120_dense_supported", lambda *args: True)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("FA4 failed")
+
+    monkeypatch.setattr(attention, "flash_attn4_func", fail, raising=False)
+    q = torch.zeros((1, 2, 3, 4))
+
+    with pytest.raises(RuntimeError, match="FA4 failed"):
+        attention.attention_flash4_sm120_dense(
+            q, q, q, 2, skip_reshape=True, skip_output_reshape=True
+        )
+
+
 def test_sol_attention_registry_adapter_preserves_comfy_attention_layout(monkeypatch):
     calls = []
 
