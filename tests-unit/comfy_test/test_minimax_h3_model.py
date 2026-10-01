@@ -16,7 +16,10 @@ def make_model(video_output, audio_output):
     nn.Module.__init__(model)
     model.sigma_shift_video = 12.0
     model.sigma_shift_audio = 3.0
-    model._forward = lambda *args, **kwargs: [video_output.clone(), audio_output.clone()]
+    model._forward = lambda *args, **kwargs: [
+        video_output.clone(),
+        audio_output.clone(),
+    ]
     return model
 
 
@@ -156,7 +159,9 @@ def test_forward_scales_velocity_to_mask_timestep():
     video_mask = torch.tensor([[[[[1.0, 0.75], [0.5, 0.25]]]]])
     audio_mask = torch.tensor([[[[1.0, 0.5, 0.25], [0.75, 0.5, 0.0]]]])
     sigma = torch.tensor([0.5])
-    clean = torch.arange(video_output.numel(), dtype=torch.float32).reshape_as(video_output)
+    clean = torch.arange(video_output.numel(), dtype=torch.float32).reshape_as(
+        video_output
+    )
     model_input = clean + sigma.reshape(1, 1, 1, 1, 1) * video_mask * video_output
     model = make_model(video_output, audio_output)
 
@@ -193,5 +198,7 @@ def test_forward_scales_audio_velocity_before_carry_conversion():
         audio_denoise_mask=audio_mask,
     )
 
-    expected = -3.0 * audio_src * carry + (1.0 + 3.0 * sigma_a) * audio_output * audio_mask
+    expected = (
+        -3.0 * audio_src * carry + (1.0 + 3.0 * sigma_a) * audio_output * audio_mask
+    )
     torch.testing.assert_close(out[1], expected)
