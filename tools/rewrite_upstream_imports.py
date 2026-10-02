@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 REWRITES = (
-    (re.compile(r"\bcomfy\."), "dinkster_inference."),
+    (re.compile(r"\bcomfy\.(?!gguf\.orig_shape\.)"), "dinkster_inference."),
     (re.compile(r"\bfrom comfy\b"), "from dinkster_inference"),
     (re.compile(r"\bimport comfy\b"), "import dinkster_inference"),
 )
