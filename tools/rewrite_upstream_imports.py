@@ -34,6 +34,9 @@ def main() -> None:
     for root in args.paths:
         files = (root.rglob("*.py") if root.is_dir() else (root,))
         for path in files:
+            # This test's fixtures must retain upstream names as rewrite inputs.
+            if path.name == "rewrite_upstream_imports_test.py":
+                continue
             changed += rewrite(path)
     print(f"rewrote {changed} files")  # noqa: T201
 
