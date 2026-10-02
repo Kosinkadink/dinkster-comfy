@@ -298,7 +298,7 @@ def _umt5_tokenizer(reader):
 
 
 def _logical_shape(reader, tensor):
-    field_name = f"comfy.gguf.orig_shape.{tensor.name}"
+    field_name = f"dinkster_inference.gguf.orig_shape.{tensor.name}"
     field = reader.get_field(field_name)
     if field is None:
         return torch.Size(int(value) for value in reversed(tensor.shape))
